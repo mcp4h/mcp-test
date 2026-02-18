@@ -1,0 +1,14 @@
+data/
+backend/target/
+backend/.idea/
+backend/.classpath
+backend/.project
+backend/.settings/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+.idea/
+*.iml
+*.log
+.DS_Store
+Thumbs.db
