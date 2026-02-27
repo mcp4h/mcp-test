@@ -253,16 +253,19 @@
 								Not supported by this server.
 							</div>
 							<ul class="list compact">
-								<li
-									v-for="tool in toolList"
-									:key="tool.name"
-									:class="{ selected: tool.name === selectedTool }"
-									@click="selectTool(tool)">
-									<div>
-										<strong>{{ tool.name }}</strong>
-										<div class="muted">{{ tool.description || '' }}</div>
+							<li
+								v-for="tool in toolList"
+								:key="tool.name"
+								:class="{ selected: tool.name === selectedTool }"
+								@click="selectTool(tool)">
+								<div>
+									<strong>{{ tool.name }}</strong>
+									<div class="muted">{{ tool.description || '' }}</div>
+									<div v-if="tool.annotations && tool.annotations.preview" class="tag-row">
+										<span class="tag supported">Preview</span>
 									</div>
-								</li>
+								</div>
+							</li>
 							</ul>
 						</div>
 						<div class="card">
@@ -972,17 +975,19 @@
 					</label>
 					<label class="checkbox-field">
 						<div class="checkbox-row">
-							<input type="checkbox" v-model="editServerForm.supportsDynamicConfig"/>
+							<input type="checkbox" v-model="editServerForm.supportsDynamicConfig" :disabled="editServerForm.configInferred"/>
 							<span>Supports dynamic configuration</span>
 						</div>
 						<div class="muted">Assumes SEP-1596 and accepts configuration via experimental capabilities.</div>
+						<div v-if="editServerForm.configInferred" class="muted">Auto-detected from initialize.</div>
 					</label>
 					<label v-if="editServerForm.supportsDynamicConfig" class="checkbox-field">
 						<div class="checkbox-row">
-							<input type="checkbox" v-model="editServerForm.allowPolicy"/>
+							<input type="checkbox" v-model="editServerForm.allowPolicy" :disabled="editServerForm.policyInferred"/>
 							<span>Allow policy overrides</span>
 						</div>
 						<div class="muted">Enables per-call _meta.policy restrictions when invoking tools.</div>
+						<div v-if="editServerForm.policyInferred" class="muted">Auto-detected from initialize.</div>
 					</label>
 				</div>
 				<div v-else-if="editServerTab === 'configuration'" class="config-editor">
@@ -1086,7 +1091,9 @@
 			supportsDynamicConfig: false,
 			allowPolicy: false,
 			configJson: "",
-			configSchema: null
+			configSchema: null,
+			configInferred: false,
+			policyInferred: false
 		}
 	);
 	const editServerTab = ref("connection");
@@ -1626,6 +1633,8 @@
 	}
 	function startEdit(server) {
 		editServerId.value = server.id;
+		const inferredConfig = !!server.configSchema;
+		const inferredPolicy = !!server.policyInferred;
 		editServerForm.value = {
 			name: server.name || "",
 			description: server.description || "",
@@ -1637,10 +1646,12 @@
 			httpMessageUrl: server.httpMessageUrl || "",
 			httpHeaders: envToText(server.httpHeaders),
 			env: envToText(server.env),
-			supportsDynamicConfig: !!server.supportsDynamicConfig,
-			allowPolicy: !!server.allowPolicy,
+			supportsDynamicConfig: !!server.supportsDynamicConfig || inferredConfig,
+			allowPolicy: !!server.allowPolicy || inferredPolicy,
 			configJson: server.configuration ? formatJsonValue(server.configuration) : "",
-			configSchema: server.configSchema || null
+			configSchema: server.configSchema || null,
+			configInferred: inferredConfig,
+			policyInferred: inferredPolicy
 		};
 		editServerTab.value = "connection";
 		editServerError.value = "";
@@ -2420,13 +2431,29 @@
 		(value) => {
 			if (!currentServer.value || !value) return;
 			const schema = value.configSchema || null;
-			if (!schema) return;
+			const policySupported = !!value?.capabilities?.experimental?.policy;
 			const index = servers.value.findIndex((server) => server.id === currentServer.value);
 			if (index >= 0) {
-				servers.value[index] = { ...servers.value[index], configSchema: schema };
+				const current = servers.value[index];
+				servers.value[index] = {
+					...current,
+					configSchema: schema || current.configSchema,
+					supportsDynamicConfig: schema ? true : current.supportsDynamicConfig,
+					configInferred: schema ? true : current.configInferred,
+					allowPolicy: policySupported ? true : current.allowPolicy,
+					policyInferred: policySupported ? true : current.policyInferred
+				};
 			}
 			if (showEditModal.value && editServerId.value === currentServer.value) {
-				editServerForm.value.configSchema = schema;
+				if (schema) {
+					editServerForm.value.configSchema = schema;
+					editServerForm.value.supportsDynamicConfig = true;
+					editServerForm.value.configInferred = true;
+				}
+				if (policySupported) {
+					editServerForm.value.allowPolicy = true;
+					editServerForm.value.policyInferred = true;
+				}
 			}
 		}
 	);
