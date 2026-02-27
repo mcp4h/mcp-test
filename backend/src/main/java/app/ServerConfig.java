@@ -1,4 +1,5 @@
 package app;
+import com.fasterxml.jackson.databind.JsonNode;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
@@ -18,6 +19,10 @@ public class ServerConfig {
 	public boolean supportsTools;
 	public boolean supportsResources;
 	public boolean supportsPrompts;
+	public boolean supportsDynamicConfig;
+	public boolean allowPolicy;
+	public JsonNode configSchema;
+	public JsonNode configuration;
 	public Map<String, String> env = new HashMap<>();
 	public Map<String, List<SavedInput>> savedInputs = new HashMap<>();
 
@@ -26,7 +31,8 @@ public class ServerConfig {
 		public String name;
 		public String comment;
 		public String json;
-		public Map<String, String> meta;
+		public JsonNode meta;
+		public JsonNode policy;
 		public Instant updatedAt;
 	}
 }

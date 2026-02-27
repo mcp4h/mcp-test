@@ -35,7 +35,7 @@ public class McpResource {
 
 	@POST
 	public ServerConfig createServer(CreateServerRequest request) {
-		return repository.create(
+		ServerConfig config = repository.create(
 			request.name,
 			request.description,
 			request.command,
@@ -45,8 +45,13 @@ public class McpResource {
 			request.httpUrl,
 			request.httpMessageUrl,
 			request.httpHeaders,
-			request.env
+			request.env,
+			request.supportsDynamicConfig,
+			request.allowPolicy,
+			request.configuration
 		);
+		ensureConfigSchema(config);
+		return config;
 	}
 
 	@POST
@@ -89,10 +94,24 @@ public class McpResource {
 		if (request.env != null) {
 			config.env = request.env;
 		}
-		if (!newId.equals(serverName)) {
-			return repository.rename(serverName, newId, config);
+		if (request.supportsDynamicConfig != null) {
+			config.supportsDynamicConfig = request.supportsDynamicConfig;
+			config.configuration = request.configuration;
 		}
-		return repository.save(config);
+		if (request.allowPolicy != null) {
+			config.allowPolicy = request.allowPolicy;
+		}
+		if (request.supportsDynamicConfig == null && request.configuration != null) {
+			config.configuration = request.configuration;
+		}
+		if (!newId.equals(serverName)) {
+			ServerConfig renamed = repository.rename(serverName, newId, config);
+			ensureConfigSchema(renamed);
+			return renamed;
+		}
+		ServerConfig saved = repository.save(config);
+		ensureConfigSchema(saved);
+		return saved;
 	}
 
 	@GET
@@ -106,10 +125,11 @@ public class McpResource {
 		ServerSession session = sessions.start(serverName);
 		try {
 			session.rawInitialize = session.client
-				.initialize()
+				.initialize(session.config.configuration)
 				.get(REQUEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
 			session.capabilities = session.rawInitialize;
 			session.connected = true;
+			updateConfigSchemaFromInitialize(session.config, session.rawInitialize);
 			session.tools = safeList(session.client::listTools, supported -> session.config.supportsTools = supported);
 			session.resources = safeList(session.client::listResources, supported -> session.config.supportsResources = supported);
 			session.prompts = safeList(session.client::listPrompts, supported -> session.config.supportsPrompts = supported);
@@ -198,7 +218,7 @@ public class McpResource {
 			@PathParam("serverName") String serverName,
 			@PathParam("toolName") String toolName,
 			SavedInputRequest request) {
-		ServerConfig updated = repository.addSavedInput(serverName, toolName, request.name, request.comment, request.json, request.meta);
+		ServerConfig updated = repository.addSavedInput(serverName, toolName, request.name, request.comment, request.json, request.meta, request.policy);
 		ServerSession session = sessions.get(serverName);
 		if (session != null) {
 			session.config.savedInputs = updated.savedInputs;
@@ -235,7 +255,7 @@ public class McpResource {
 			@PathParam("toolName") String toolName,
 			@PathParam("savedId") String savedId,
 			SavedInputRequest request) {
-		ServerConfig updated = repository.updateSavedInput(serverName, toolName, savedId, request.name, request.comment, request.json, request.meta);
+		ServerConfig updated = repository.updateSavedInput(serverName, toolName, savedId, request.name, request.comment, request.json, request.meta, request.policy);
 		ServerSession session = sessions.get(serverName);
 		if (session != null) {
 			session.config.savedInputs = updated.savedInputs;
@@ -340,6 +360,50 @@ public class McpResource {
 		return node.asText();
 	}
 
+	private void ensureConfigSchema(ServerConfig config) {
+		if (config == null || !config.supportsDynamicConfig) {
+			return;
+		}
+		if (config.configSchema != null && !config.configSchema.isNull()) {
+			return;
+		}
+		ServerSession existing = sessions.get(config.id);
+		if (existing != null && existing.rawInitialize != null) {
+			updateConfigSchemaFromInitialize(config, existing.rawInitialize);
+			repository.save(config);
+			return;
+		}
+		if (sessions.isRunning(config.id)) {
+			return;
+		}
+		ServerSession session = sessions.start(config.id);
+		try {
+			JsonNode initialize = session.client
+				.initialize(config.configuration)
+				.get(REQUEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+			session.rawInitialize = initialize;
+			session.connected = true;
+			updateConfigSchemaFromInitialize(config, initialize);
+			repository.save(config);
+		}
+		catch (Exception e) {
+			throw new IllegalStateException("Failed to fetch config schema", e);
+		}
+		finally {
+			sessions.stop(config.id);
+		}
+	}
+
+	private void updateConfigSchemaFromInitialize(ServerConfig config, JsonNode initialize) {
+		if (config == null || !config.supportsDynamicConfig || initialize == null) {
+			return;
+		}
+		JsonNode schema = initialize.get("configSchema");
+		if (schema != null && !schema.isNull()) {
+			config.configSchema = schema;
+		}
+	}
+
 	public static class CreateServerRequest {
 		public String name;
 		public String description;
@@ -351,6 +415,9 @@ public class McpResource {
 		public String httpMessageUrl;
 		public Map<String, String> httpHeaders;
 		public Map<String, String> env;
+		public boolean supportsDynamicConfig;
+		public boolean allowPolicy;
+		public JsonNode configuration;
 	}
 
 	public static class UpdateServerRequest {
@@ -364,12 +431,15 @@ public class McpResource {
 		public String httpMessageUrl;
 		public Map<String, String> httpHeaders;
 		public Map<String, String> env;
+		public Boolean supportsDynamicConfig;
+		public Boolean allowPolicy;
+		public JsonNode configuration;
 	}
 
 	public static class InvokeRequest {
 		public String toolName;
 		public String json;
-		public Map<String, String> meta;
+		public JsonNode meta;
 	}
 
 	public static class ResourceRequest {
@@ -385,7 +455,8 @@ public class McpResource {
 		public String name;
 		public String comment;
 		public String json;
-		public Map<String, String> meta;
+		public JsonNode meta;
+		public JsonNode policy;
 	}
 
 	public static class FacetsResponse {

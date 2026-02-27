@@ -4,7 +4,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 public interface McpClient {
-  CompletableFuture<JsonNode> initialize();
+  CompletableFuture<JsonNode> initialize(JsonNode configuration);
 
   CompletableFuture<JsonNode> listTools();
 
@@ -12,7 +12,7 @@ public interface McpClient {
 
   CompletableFuture<JsonNode> listPrompts();
 
-  CompletableFuture<JsonNode> callTool(String name, JsonNode arguments, Map<String, String> meta);
+  CompletableFuture<JsonNode> callTool(String name, JsonNode arguments, JsonNode meta);
 
   CompletableFuture<JsonNode> readResource(String uri);
 

@@ -58,7 +58,10 @@ public class ServerRepository {
 		String httpUrl,
 		String httpMessageUrl,
 		java.util.Map<String, String> httpHeaders,
-		java.util.Map<String, String> env) {
+		java.util.Map<String, String> env,
+		boolean supportsDynamicConfig,
+		boolean allowPolicy,
+		com.fasterxml.jackson.databind.JsonNode configuration) {
 		loadAllIfNeeded();
 		String id = ServerNames.toId(name);
 		if (id.isBlank()) {
@@ -78,6 +81,9 @@ public class ServerRepository {
 		config.transport = transport == null || transport.isBlank() ? "stdio" : transport;
 		config.httpUrl = httpUrl;
 		config.httpMessageUrl = httpMessageUrl;
+		config.supportsDynamicConfig = supportsDynamicConfig;
+		config.allowPolicy = allowPolicy;
+		config.configuration = configuration;
 		if (httpHeaders != null) {
 			config.httpHeaders.putAll(httpHeaders);
 		}
@@ -126,7 +132,8 @@ public class ServerRepository {
 		String name,
 		String comment,
 		String json,
-		java.util.Map<String, String> meta) {
+		com.fasterxml.jackson.databind.JsonNode meta,
+		com.fasterxml.jackson.databind.JsonNode policy) {
 		ServerConfig config = require(serverId);
 		ServerConfig.SavedInput input = new ServerConfig.SavedInput();
 		input.id = UUID.randomUUID().toString();
@@ -134,6 +141,7 @@ public class ServerRepository {
 		input.comment = comment;
 		input.json = json;
 		input.meta = meta;
+		input.policy = policy;
 		input.updatedAt = Instant.now();
 		config.savedInputs
 			.computeIfAbsent(toolName, k -> new ArrayList<>())
@@ -165,7 +173,8 @@ public class ServerRepository {
 		String name,
 		String comment,
 		String json,
-		java.util.Map<String, String> meta) {
+		com.fasterxml.jackson.databind.JsonNode meta,
+		com.fasterxml.jackson.databind.JsonNode policy) {
 		ServerConfig config = require(serverId);
 		var list = config.savedInputs.get(toolName);
 		if (list == null) {
@@ -179,12 +188,11 @@ public class ServerRepository {
 			throw new IllegalArgumentException("Saved inputs not found for tool: " + toolName);
 		}
 		LOGGER.infof(
-			"Update saved input. server=%s tool=%s savedId=%s jsonLength=%s metaKeys=%s dataDir=%s",
+			"Update saved input. server=%s tool=%s savedId=%s jsonLength=%s dataDir=%s",
 			serverId,
 			toolName,
 			savedId,
 			json == null ? "null" : String.valueOf(json.length()),
-			meta == null ? "null" : String.valueOf(meta.keySet()),
 			dataDir.toAbsolutePath()
 		);
 		boolean updated = false;
@@ -199,10 +207,13 @@ public class ServerRepository {
 				if (json != null) {
 					item.json = json;
 				}
-				if (meta != null) {
-					item.meta = meta;
-				}
-				item.updatedAt = Instant.now();
+			if (meta != null) {
+				item.meta = meta;
+			}
+			if (policy != null) {
+				item.policy = policy;
+			}
+			item.updatedAt = Instant.now();
 				updated = true;
 				break;
 			}

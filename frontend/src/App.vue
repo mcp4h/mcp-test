@@ -199,6 +199,15 @@
 									:disabled="!status.running"/>
 								Prompts
 							</label>
+							<label
+								class="toggle-button"
+								:class="{ active: showConfigSchema, disabled: !hasConfigSchema }">
+								<input
+									type="checkbox"
+									v-model="showConfigSchema"
+									:disabled="!hasConfigSchema"/>
+								Config Schema
+							</label>
 						</div>
 						<div class="definition-viewer">
 							<JsonViewer
@@ -265,33 +274,65 @@
 									<button
 										:class="{ active: toolPanelTab === 'output-schema' }"
 										@click="toolPanelTab = 'output-schema'">Output Schema</button>
+									<button
+										v-if="selectedServer?.allowPolicy"
+										:class="{ active: toolPanelTab === 'policy-definition' }"
+										@click="toolPanelTab = 'policy-definition'">Policy Definition</button>
 									<button :class="{ active: toolPanelTab === 'meta' }" @click="toolPanelTab = 'meta'">Meta</button>
 								</div>
 								<div v-if="toolPanelTab === 'invoke'">
-									<div class="field-row">
-										<label>JSON input</label>
-										<div class="field-row-actions">
-											<button class="ghost" @click="addMeta">Add meta key</button>
-											<button
-												class="ghost"
-												@click="generateTemplate"
-												:disabled="!getToolInputSchema(selectedToolInfo)">Generate Input</button>
-											<button class="ghost" @click="formatToolJson">Format Input</button>
-											<button class="ghost" @click="openSavedInputs">Load Input</button>
-											<button class="ghost" @click="openSaveInputs">Save Input</button>
+									<div class="invoke-tabs">
+										<button
+											:class="{ active: invokeTab === 'input' }"
+											@click="invokeTab = 'input'">Input</button>
+										<button
+											v-if="selectedServer?.allowPolicy"
+											:class="{ active: invokeTab === 'policy', filled: policyDrafted }"
+											@click="invokeTab = 'policy'">
+											Policy
+											<span v-if="policyDrafted" class="tab-badge"></span>
+										</button>
+									</div>
+									<div v-if="invokeTab === 'input'">
+										<div class="field-row">
+											<label>JSON input</label>
+											<div class="field-row-actions">
+												<button class="ghost" @click="addMeta">Add meta key</button>
+												<button
+													class="ghost"
+													@click="generateTemplate"
+													:disabled="!getToolInputSchema(selectedToolInfo)">Generate Input</button>
+												<button class="ghost" @click="formatToolJson">Format Input</button>
+												<button class="ghost" @click="openSavedInputs">Load Input</button>
+												<button class="ghost" @click="openSaveInputs">Save Input</button>
+											</div>
+										</div>
+										<JsonEditorAdapter v-model="toolJson"/>
+										<div v-if="toolJsonError" class="banner error">{{ toolJsonError }}</div>
+										<div class="meta">
+											<div
+												v-for="(entry, index) in metaEntries"
+												:key="index"
+												class="meta-row">
+												<input v-model="entry.key" placeholder="key"/>
+												<input v-model="entry.value" placeholder="value"/>
+												<button class="ghost" @click="removeMeta(index)">Remove</button>
+											</div>
 										</div>
 									</div>
-									<JsonEditorAdapter v-model="toolJson"/>
-									<div v-if="toolJsonError" class="banner error">{{ toolJsonError }}</div>
-									<div class="meta">
-										<div
-											v-for="(entry, index) in metaEntries"
-											:key="index"
-											class="meta-row">
-											<input v-model="entry.key" placeholder="key"/>
-											<input v-model="entry.value" placeholder="value"/>
-											<button class="ghost" @click="removeMeta(index)">Remove</button>
+									<div v-else-if="selectedServer?.allowPolicy">
+										<div class="field-row">
+											<label>Policy (optional)</label>
+											<div class="field-row-actions">
+												<button
+													class="ghost"
+													@click="generatePolicy"
+													:disabled="!policySchema">Generate Policy</button>
+											</div>
 										</div>
+										<JsonEditorAdapter v-model="policyJson"/>
+										<div v-if="policyJsonError" class="banner error">{{ policyJsonError }}</div>
+										<div class="muted">Applied as _meta.policy for this tool call.</div>
 									</div>
 									<div class="button-row">
 										<button @click="invokeSelected">Invoke</button>
@@ -386,6 +427,14 @@
 										:indent-style="indentStyle"
 										:indent-size="indentSize"/>
 									<div v-else class="muted">No output schema available.</div>
+								</div>
+								<div v-else-if="toolPanelTab === 'policy-definition'" class="schema">
+									<JsonViewer
+										v-if="policySchema"
+										:value="policySchema"
+										:indent-style="indentStyle"
+										:indent-size="indentSize"/>
+									<div v-else class="muted">No policy definition available.</div>
 								</div>
 								<div v-else-if="toolPanelTab === 'meta'" class="schema">
 									<JsonViewer
@@ -606,7 +655,13 @@
 						</svg>
 					</button>
 				</div>
-				<div class="grid">
+				<div v-if="newServerError" class="banner error">{{ newServerError }}</div>
+				<div v-if="newServer.supportsDynamicConfig" class="subtabs">
+					<button :class="{ active: newServerTab === 'connection' }" @click="newServerTab = 'connection'">Connection</button>
+					<button :class="{ active: newServerTab === 'configuration' }" @click="newServerTab = 'configuration'">Configuration</button>
+					<button :class="{ active: newServerTab === 'schema' }" @click="newServerTab = 'schema'">Schema</button>
+				</div>
+				<div v-if="newServerTab === 'connection'" class="grid">
 					<label>
 						Name
 						<input v-model="newServer.name" placeholder="my-mcp"/>
@@ -660,6 +715,41 @@
 							rows="4"
 							placeholder="FOO=bar"></textarea>
 					</label>
+					<label class="checkbox-field">
+						<div class="checkbox-row">
+							<input type="checkbox" v-model="newServer.supportsDynamicConfig"/>
+							<span>Supports dynamic configuration</span>
+						</div>
+						<div class="muted">Assumes SEP-1596 and accepts configuration via experimental capabilities.</div>
+					</label>
+					<label v-if="newServer.supportsDynamicConfig" class="checkbox-field">
+						<div class="checkbox-row">
+							<input type="checkbox" v-model="newServer.allowPolicy"/>
+							<span>Allow policy overrides</span>
+						</div>
+						<div class="muted">Enables per-call _meta.policy restrictions when invoking tools.</div>
+					</label>
+				</div>
+				<div v-else-if="newServerTab === 'configuration'" class="config-editor">
+					<label>
+						Configuration JSON
+						<JsonEditorAdapter v-model="newServer.configJson"/>
+					</label>
+					<div class="button-row">
+						<button class="ghost" @click="generateConfigForNew" :disabled="!newServerConfigSchema">Generate from schema</button>
+					</div>
+					<div class="muted">This configuration is sent during initialize under experimental capabilities.</div>
+				</div>
+				<div v-else class="config-editor">
+					<div class="panel-header">
+						<h3>Configuration Schema</h3>
+					</div>
+					<JsonViewer
+						v-if="newServerConfigSchema"
+						:value="newServerConfigSchema"
+						:indent-style="indentStyle"
+						:indent-size="indentSize"/>
+					<div v-else class="muted">No schema available yet. Save the server to fetch it.</div>
 				</div>
 				<div class="button-row">
 					<button @click="createNewServer">Save Server</button>
@@ -826,7 +916,13 @@
 						</svg>
 					</button>
 				</div>
-				<div class="grid">
+				<div v-if="editServerError" class="banner error">{{ editServerError }}</div>
+				<div v-if="editServerForm.supportsDynamicConfig" class="subtabs">
+					<button :class="{ active: editServerTab === 'connection' }" @click="editServerTab = 'connection'">Connection</button>
+					<button :class="{ active: editServerTab === 'configuration' }" @click="editServerTab = 'configuration'">Configuration</button>
+					<button :class="{ active: editServerTab === 'schema' }" @click="editServerTab = 'schema'">Schema</button>
+				</div>
+				<div v-if="editServerTab === 'connection'" class="grid">
 					<label>
 						Name
 						<input v-model="editServerForm.name"/>
@@ -874,6 +970,41 @@
 						Env (KEY=VALUE per line)
 						<textarea v-model="editServerForm.env" rows="4"></textarea>
 					</label>
+					<label class="checkbox-field">
+						<div class="checkbox-row">
+							<input type="checkbox" v-model="editServerForm.supportsDynamicConfig"/>
+							<span>Supports dynamic configuration</span>
+						</div>
+						<div class="muted">Assumes SEP-1596 and accepts configuration via experimental capabilities.</div>
+					</label>
+					<label v-if="editServerForm.supportsDynamicConfig" class="checkbox-field">
+						<div class="checkbox-row">
+							<input type="checkbox" v-model="editServerForm.allowPolicy"/>
+							<span>Allow policy overrides</span>
+						</div>
+						<div class="muted">Enables per-call _meta.policy restrictions when invoking tools.</div>
+					</label>
+				</div>
+				<div v-else-if="editServerTab === 'configuration'" class="config-editor">
+					<label>
+						Configuration JSON
+						<JsonEditorAdapter v-model="editServerForm.configJson"/>
+					</label>
+					<div class="button-row">
+						<button class="ghost" @click="generateConfigForEdit" :disabled="!editServerConfigSchema">Generate from schema</button>
+					</div>
+					<div class="muted">This configuration is sent during initialize under experimental capabilities.</div>
+				</div>
+				<div v-else class="config-editor">
+					<div class="panel-header">
+						<h3>Configuration Schema</h3>
+					</div>
+					<JsonViewer
+						v-if="editServerConfigSchema"
+						:value="editServerConfigSchema"
+						:indent-style="indentStyle"
+						:indent-size="indentSize"/>
+					<div v-else class="muted">No configuration schema available.</div>
 				</div>
 				<p class="muted">Changing the name renames the server id. Stop the server before renaming.</p>
 				<div class="button-row">
@@ -930,6 +1061,12 @@
 	const activeContentLoading = ref({});
 	const isIframeFullscreen = ref(false);
 	const toolJsonError = ref("");
+	const policyJson = ref("");
+	const policyJsonError = ref("");
+	const invokeTab = ref("input");
+ 	const policyDrafted = computed(
+ 		() => !!(policyJson.value && policyJson.value.trim())
+ 	);
 	const metaEntries = ref([]);
 	const savedInputs = ref([]);
 	const selectedSavedInputId = ref("");
@@ -945,9 +1082,15 @@
 			httpUrl: "",
 			httpMessageUrl: "",
 			httpHeaders: "",
-			env: ""
+			env: "",
+			supportsDynamicConfig: false,
+			allowPolicy: false,
+			configJson: "",
+			configSchema: null
 		}
 	);
+	const editServerTab = ref("connection");
+	const editServerError = ref("");
 	const selectedResource = ref(null);
 	const resourceResponse = ref(null);
 	const resourceValues = ref({});
@@ -966,6 +1109,8 @@
 	const saveInputDraft = ref({ name: "", comment: "" });
 	const savedInputsNotice = ref("");
 	const savedInputsError = ref("");
+	const newServerTab = ref("connection");
+	const newServerError = ref("");
 	const currentLoadedSavedId = ref("");
 	const currentLoadedInputMeta = ref({ name: "", comment: "" });
 	const indentStyle = ref("tabs");
@@ -981,7 +1126,10 @@
 			httpUrl: "",
 			httpMessageUrl: "",
 			httpHeaders: "",
-			env: ""
+			env: "",
+			supportsDynamicConfig: false,
+			allowPolicy: false,
+			configJson: ""
 		}
 	);
 	let logStream;
@@ -1000,6 +1148,15 @@
 		() => {
 			if (!selectedToolInfo.value) return null;
 			return selectedToolInfo.value._meta || selectedToolInfo.value.meta || null;
+		}
+	);
+	const editServerConfigSchema = computed(() => editServerForm.value.configSchema || null);
+	const newServerConfigSchema = computed(() => null);
+	const policySchema = computed(
+		() => {
+			const schema = selectedServer.value?.configSchema || status.value.initialize?.configSchema || null;
+			if (!schema) return null;
+			return filterPolicySchema(schema);
 		}
 	);
 	const responseResult = computed(
@@ -1258,11 +1415,17 @@
 	const showTools = ref(false);
 	const showResources = ref(false);
 	const showPrompts = ref(false);
+	const showConfigSchema = ref(false);
 	const serverDefinition = computed(
 		() => {
 			if (!currentServer.value) return null;
-			if (!status.value.initialize) return null;
-			const definition = { initialize: status.value.initialize };
+			const definition = {};
+			if (status.value.initialize) {
+				definition.initialize = status.value.initialize;
+			}
+			if (showConfigSchema.value) {
+				definition.configSchema = selectedServer.value?.configSchema || status.value.initialize?.configSchema || null;
+			}
 			if (showTools.value) {
 				definition.tools = facets.value.tools?.tools || null;
 			}
@@ -1272,7 +1435,13 @@
 			if (showPrompts.value) {
 				definition.prompts = facets.value.prompts?.prompts || null;
 			}
-			return definition;
+			return Object.keys(definition).length ? definition : null;
+		}
+	);
+	const hasConfigSchema = computed(
+		() => {
+			const schema = selectedServer.value?.configSchema || status.value.initialize?.configSchema || null;
+			return schema != null;
 		}
 	);
 	const resourceList = computed(() => facets.value.resources?.resources || []);
@@ -1406,7 +1575,14 @@
 		}
 	}
 	async function createNewServer() {
+		newServerError.value = "";
 		const envMap = parseEnv(newServer.value.env);
+		const configParse = parseOptionalJson(newServer.value.configJson, "Configuration");
+		if (configParse.error) {
+			newServerError.value = configParse.error;
+			return;
+		}
+		const supportsDynamicConfig = !!newServer.value.supportsDynamicConfig;
 		const payload = {
 			name: newServer.value.name,
 			description: newServer.value.description,
@@ -1417,24 +1593,36 @@
 			httpUrl: newServer.value.httpUrl,
 			httpMessageUrl: newServer.value.httpMessageUrl,
 			httpHeaders: parseEnv(newServer.value.httpHeaders),
-			env: envMap
+			env: envMap,
+			supportsDynamicConfig,
+			allowPolicy: supportsDynamicConfig ? !!newServer.value.allowPolicy : false,
+			configuration: supportsDynamicConfig ? configParse.value : null
 		};
-		const created = await createServer(payload);
-		await loadServers();
-		currentServer.value = created.id;
-		newServer.value = {
-			name: "",
-			description: "",
-			command: "",
-			cwd: "",
-			framing: "ndjson",
-			transport: "stdio",
-			httpUrl: "",
-			httpMessageUrl: "",
-			httpHeaders: "",
-			env: ""
-		};
-		showAddModal.value = false;
+		try {
+			const created = await createServer(payload);
+			await loadServers();
+			currentServer.value = created.id;
+			newServer.value = {
+				name: "",
+				description: "",
+				command: "",
+				cwd: "",
+				framing: "ndjson",
+				transport: "stdio",
+				httpUrl: "",
+				httpMessageUrl: "",
+				httpHeaders: "",
+				env: "",
+				supportsDynamicConfig: false,
+				allowPolicy: false,
+				configJson: ""
+			};
+			newServerTab.value = "connection";
+			showAddModal.value = false;
+		}
+		catch (error) {
+			newServerError.value = error?.message || "Failed to create server.";
+		}
 	}
 	function startEdit(server) {
 		editServerId.value = server.id;
@@ -1448,15 +1636,30 @@
 			httpUrl: server.httpUrl || "",
 			httpMessageUrl: server.httpMessageUrl || "",
 			httpHeaders: envToText(server.httpHeaders),
-			env: envToText(server.env)
+			env: envToText(server.env),
+			supportsDynamicConfig: !!server.supportsDynamicConfig,
+			allowPolicy: !!server.allowPolicy,
+			configJson: server.configuration ? formatJsonValue(server.configuration) : "",
+			configSchema: server.configSchema || null
 		};
+		editServerTab.value = "connection";
+		editServerError.value = "";
 		showEditModal.value = true;
 	}
 	function cancelEdit() {
 		editServerId.value = "";
+		editServerError.value = "";
+		editServerTab.value = "connection";
 		showEditModal.value = false;
 	}
 	async function saveServerEdits(id) {
+		editServerError.value = "";
+		const configParse = parseOptionalJson(editServerForm.value.configJson, "Configuration");
+		if (configParse.error) {
+			editServerError.value = configParse.error;
+			return;
+		}
+		const supportsDynamicConfig = !!editServerForm.value.supportsDynamicConfig;
 		const payload = {
 			name: editServerForm.value.name,
 			description: editServerForm.value.description,
@@ -1467,15 +1670,23 @@
 			httpUrl: editServerForm.value.httpUrl,
 			httpMessageUrl: editServerForm.value.httpMessageUrl,
 			httpHeaders: parseEnv(editServerForm.value.httpHeaders),
-			env: parseEnv(editServerForm.value.env)
+			env: parseEnv(editServerForm.value.env),
+			supportsDynamicConfig,
+			allowPolicy: supportsDynamicConfig ? !!editServerForm.value.allowPolicy : false,
+			configuration: supportsDynamicConfig ? configParse.value : null
 		};
-		const updated = await updateServer(id, payload);
-		await loadServers();
-		if (currentServer.value === id) {
-			currentServer.value = updated.id;
+		try {
+			const updated = await updateServer(id, payload);
+			await loadServers();
+			if (currentServer.value === id) {
+				currentServer.value = updated.id;
+			}
+			editServerId.value = "";
+			showEditModal.value = false;
 		}
-		editServerId.value = "";
-		showEditModal.value = false;
+		catch (error) {
+			editServerError.value = error?.message || "Failed to save server.";
+		}
 	}
 	async function viewServer(id) {
 		if (!id) return;
@@ -1643,10 +1854,13 @@
 		selectedTool.value = tool.name;
 		selectedToolInfo.value = tool;
 		toolPanelTab.value = "invoke";
+		invokeTab.value = "input";
 		toolJson.value = "{}";
 		toolResponse.value = null;
 		toolResponseTab.value = "result";
 		metaEntries.value = [];
+		policyJson.value = "";
+		policyJsonError.value = "";
 		currentLoadedSavedId.value = "";
 		currentLoadedInputMeta.value = { name: "", comment: "" };
 		selectedSavedInputId.value = "";
@@ -1660,8 +1874,11 @@
 			return;
 		}
 		toolJsonError.value = "";
-		const meta = buildMetaMap();
-		toolResponse.value = await invokeTool(currentServer.value, { toolName: selectedTool.value, json: toolJson.value, meta });
+		const payload = buildMetaPayload();
+		if (payload.error) {
+			return;
+		}
+		toolResponse.value = await invokeTool(currentServer.value, { toolName: selectedTool.value, json: toolJson.value, meta: payload.meta });
 	}
 	function addMeta() {
 		metaEntries.value.push({ key: "", value: "" });
@@ -1682,6 +1899,22 @@
 		if (!schema) return;
 		const template = buildTemplate(schema);
 		toolJson.value = formatJsonValue(template);
+	}
+	function generateConfigForEdit() {
+		if (!editServerConfigSchema.value) return;
+		const template = buildTemplate(editServerConfigSchema.value);
+		editServerForm.value.configJson = formatJsonValue(template);
+	}
+	function generateConfigForNew() {
+		if (!newServerConfigSchema.value) return;
+		const template = buildTemplate(newServerConfigSchema.value);
+		newServer.value.configJson = formatJsonValue(template);
+	}
+	function generatePolicy() {
+		if (!policySchema.value) return;
+		const template = buildTemplate(policySchema.value);
+		policyJson.value = formatJsonValue(template);
+		policyJsonError.value = "";
 	}
 	async function loadSavedInputs() {
 		if (!currentServer.value || !selectedTool.value) return;
@@ -1707,7 +1940,13 @@
 	}
 	async function saveNewInputFromSidebar() {
 		if (!currentServer.value || !selectedTool.value || !saveInputDraft.value.name) return;
-		const meta = buildMetaMap() || extractMetaFromJson(toolJson.value);
+		const meta = buildMetaObject() || extractMetaFromJson(toolJson.value);
+		const policyParse = selectedServer.value?.allowPolicy ? parseOptionalJson(policyJson.value, "Policy") : { value: null, error: null };
+		if (policyParse.error) {
+			policyJsonError.value = policyParse.error;
+			return;
+		}
+		policyJsonError.value = "";
 		try {
 			await saveInput(
 				currentServer
@@ -1718,7 +1957,8 @@
 					name: saveInputDraft.value.name,
 					comment: saveInputDraft.value.comment,
 					json: toolJson.value,
-					meta
+					meta,
+					policy: policyParse.value
 				}
 			);
 			await loadSavedInputs();
@@ -1733,7 +1973,13 @@
 	}
 	async function overwriteSavedInput(input) {
 		if (!currentServer.value || !selectedTool.value || !input?.id) return;
-		const meta = buildMetaMap() || extractMetaFromJson(toolJson.value);
+		const meta = buildMetaObject() || extractMetaFromJson(toolJson.value);
+		const policyParse = selectedServer.value?.allowPolicy ? parseOptionalJson(policyJson.value, "Policy") : { value: null, error: null };
+		if (policyParse.error) {
+			policyJsonError.value = policyParse.error;
+			return;
+		}
+		policyJsonError.value = "";
 		try {
 			await updateSavedInput(
 				currentServer
@@ -1746,7 +1992,8 @@
 					name: input.name || "",
 					comment: input.comment || "",
 					json: toolJson.value,
-					meta
+					meta,
+					policy: policyParse.value
 				}
 			);
 			if (currentLoadedSavedId.value === input.id) {
@@ -1775,7 +2022,11 @@
 	}
 	function loadSavedInput(input) {
 		toolJson.value = input.json || "{}";
-		metaEntries.value = Object.entries(input.meta || {}).map(([key, value]) => ({ key, value }));
+		const meta = input.meta && typeof input.meta === "object" && !Array.isArray(input.meta) ? input.meta : {};
+		metaEntries.value = Object.entries(meta)
+			.map(([key, value]) => ({ key, value: value == null ? "" : String(value) }));
+		policyJson.value = input.policy ? formatJsonValue(input.policy) : "";
+		policyJsonError.value = "";
 		currentLoadedSavedId.value = input.id || "";
 		currentLoadedInputMeta.value = { name: input.name || "", comment: input.comment || "" };
 		selectedSavedInputId.value = input.id || "";
@@ -1959,7 +2210,7 @@
 		if (type === "boolean") return false;
 		return "";
 	}
-	function buildMetaMap() {
+	function buildMetaObject() {
 		const meta = metaEntries.value
 			.map((entry) => ({ key: (entry.key || "").trim(), value: entry.value == null ? "" : String(entry.value) }))
 			.filter((entry) => entry.key)
@@ -1972,6 +2223,21 @@
 			);
 		return Object.keys(meta).length ? meta : null;
 	}
+	function buildMetaPayload() {
+		const meta = buildMetaObject() || {};
+		if (selectedServer.value?.allowPolicy) {
+			const policyParse = parseOptionalJson(policyJson.value, "Policy");
+			if (policyParse.error) {
+				policyJsonError.value = policyParse.error;
+				return { meta: null, error: policyParse.error };
+			}
+			policyJsonError.value = "";
+			if (policyParse.value) {
+				meta.policy = policyParse.value;
+			}
+		}
+		return { meta: Object.keys(meta).length ? meta : null, error: null };
+	}
 	function extractMetaFromJson(text) {
 		try {
 			const parsed = JSON.parse(text || "{}");
@@ -1980,6 +2246,12 @@
 			const meta = Object.entries(rawMeta)
 				.reduce(
 					(acc, [key, value]) => {
+						if (key === "policy") {
+							return acc;
+						}
+						if (value != null && typeof value === "object") {
+							return acc;
+						}
 						acc[String(key)] = value == null ? "" : String(value);
 						return acc;
 					},
@@ -2004,6 +2276,76 @@
 		catch (error) {
 			const message = error?.message || "Invalid JSON";
 			return `Invalid JSON: ${message}`;
+		}
+	}
+	function filterPolicySchema(schema) {
+		if (!schema || typeof schema !== "object") return schema;
+		if (Array.isArray(schema)) {
+			return schema.map((entry) => filterPolicySchema(entry)).filter((entry) => entry != null);
+		}
+		if (schema.scope === "configuration") {
+			return null;
+		}
+		const result = { ...schema };
+		if (result.scope) {
+			delete result.scope;
+		}
+		if (result.properties && typeof result.properties === "object") {
+			const filtered = {};
+			for (const [key, value] of Object.entries(result.properties)) {
+				if (value && typeof value === "object" && value.scope === "configuration") {
+					continue;
+				}
+				const next = filterPolicySchema(value);
+				if (next != null) {
+					filtered[key] = next;
+				}
+			}
+			result.properties = filtered;
+		}
+		if (result.items) {
+			const items = filterPolicySchema(result.items);
+			if (items != null) {
+				result.items = items;
+			}
+		}
+		if (Array.isArray(result.oneOf)) {
+			const filtered = result.oneOf.map(filterPolicySchema).filter((entry) => entry != null);
+			if (filtered.length) {
+				result.oneOf = filtered;
+			}
+			else {
+				delete result.oneOf;
+			}
+		}
+		if (Array.isArray(result.anyOf)) {
+			const filtered = result.anyOf.map(filterPolicySchema).filter((entry) => entry != null);
+			if (filtered.length) {
+				result.anyOf = filtered;
+			}
+			else {
+				delete result.anyOf;
+			}
+		}
+		if (Array.isArray(result.allOf)) {
+			const filtered = result.allOf.map(filterPolicySchema).filter((entry) => entry != null);
+			if (filtered.length) {
+				result.allOf = filtered;
+			}
+			else {
+				delete result.allOf;
+			}
+		}
+		return result;
+	}
+	function parseOptionalJson(text, label) {
+		if (!text || !text.trim()) return { value: null, error: null };
+		try {
+			return { value: JSON.parse(text), error: null };
+		}
+		catch (error) {
+			const message = error?.message || "Invalid JSON";
+			return { value: null, error: `${label} must be valid JSON: ${message}` };
 		}
 	}
 	function formatJsonValue(value) {
@@ -2053,6 +2395,58 @@
 				serverStatuses.value[value] = status.value;
 				connectionState.value = "error";
 				connectionError.value = error?.message || "Failed to load server status.";
+			}
+		}
+	);
+	watch(
+		hasConfigSchema,
+		(value) => {
+			if (!value) {
+				showConfigSchema.value = false;
+			}
+		}
+	);
+	watch(
+		showAddModal,
+		(value) => {
+			if (value) {
+				newServerError.value = "";
+				newServerTab.value = "connection";
+			}
+		}
+	);
+	watch(
+		() => status.value.initialize,
+		(value) => {
+			if (!currentServer.value || !value) return;
+			const schema = value.configSchema || null;
+			if (!schema) return;
+			const index = servers.value.findIndex((server) => server.id === currentServer.value);
+			if (index >= 0) {
+				servers.value[index] = { ...servers.value[index], configSchema: schema };
+			}
+			if (showEditModal.value && editServerId.value === currentServer.value) {
+				editServerForm.value.configSchema = schema;
+			}
+		}
+	);
+	watch(
+		() => newServer.value.supportsDynamicConfig,
+		(value) => {
+			if (!value) {
+				newServer.value.allowPolicy = false;
+				newServer.value.configJson = "";
+				newServerTab.value = "connection";
+			}
+		}
+	);
+	watch(
+		() => editServerForm.value.supportsDynamicConfig,
+		(value) => {
+			if (!value) {
+				editServerForm.value.allowPolicy = false;
+				editServerForm.value.configJson = "";
+				editServerTab.value = "connection";
 			}
 		}
 	);
@@ -3294,6 +3688,94 @@
 
 	.modal .grid {
 		gap: 16px;
+	}
+
+	.checkbox-field {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 8px 10px;
+		border-radius: 12px;
+		border: 1px solid var(--color-border);
+		background: rgba(12, 18, 24, 0.6);
+	}
+
+	.checkbox-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		justify-content: flex-start;
+	}
+
+	.checkbox-row input {
+		flex: 0 0 auto;
+		width: auto;
+		margin: 0;
+	}
+
+	.checkbox-row span {
+		flex: 1 1 auto;
+		min-width: 0;
+	}
+
+	.checkbox-row span {
+		font-weight: 600;
+	}
+
+	.invoke-tabs {
+		display: inline-flex;
+		gap: 16px;
+		margin-bottom: 12px;
+	}
+
+	.invoke-tabs button {
+		border: none;
+		background: transparent;
+		color: var(--color-muted);
+		padding: 4px 0;
+		font-size: 12px;
+		position: relative;
+	}
+
+	.invoke-tabs button.active {
+		color: var(--color-text);
+	}
+
+	.invoke-tabs button.active::after {
+		content: "";
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: -4px;
+		height: 2px;
+		background: var(--color-accent);
+		border-radius: 999px;
+	}
+
+	.tab-badge {
+		display: inline-block;
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--color-accent);
+		margin-left: 6px;
+		transform: translateY(-2px);
+	}
+
+	.config-editor {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		margin-top: 12px;
+	}
+
+	.policy-panel {
+		margin-top: 16px;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding-top: 12px;
+		border-top: 1px solid var(--color-border);
 	}
 
 	.modal-header {

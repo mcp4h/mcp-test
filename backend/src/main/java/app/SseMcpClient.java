@@ -57,10 +57,14 @@ public class SseMcpClient implements McpClient {
 	}
 
 	@Override
-	public CompletableFuture<JsonNode> initialize() {
+	public CompletableFuture<JsonNode> initialize(JsonNode configuration) {
 		ObjectNode params = mapper.createObjectNode();
 		params.put("protocolVersion", "2024-11-05");
-		params.putObject("capabilities");
+		ObjectNode capabilities = params.putObject("capabilities");
+		if (configuration != null && !configuration.isNull()) {
+			ObjectNode experimental = capabilities.putObject("experimental");
+			experimental.set("configuration", configuration);
+		}
 		ObjectNode clientInfo = params.putObject("clientInfo");
 		clientInfo.put("name", "mcp-tester");
 		clientInfo.put("version", "0.1.0");
@@ -87,14 +91,14 @@ public class SseMcpClient implements McpClient {
 	}
 
 	@Override
-	public CompletableFuture<JsonNode> callTool(String name, JsonNode arguments, Map<String, String> meta) {
+	public CompletableFuture<JsonNode> callTool(String name, JsonNode arguments, JsonNode meta) {
 		ObjectNode params = mapper.createObjectNode();
 		params.put("name", name);
 		if (arguments != null) {
 			params.set("arguments", arguments);
 		}
-		if (meta != null && !meta.isEmpty()) {
-			params.set("_meta", mapper.valueToTree(meta));
+		if (meta != null && !meta.isNull()) {
+			params.set("_meta", meta);
 		}
 		return requestRaw("tools/call", params);
 	}
