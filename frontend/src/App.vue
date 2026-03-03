@@ -312,18 +312,22 @@
 										</div>
 										<JsonEditorAdapter v-model="toolJson"/>
 										<div v-if="toolJsonError" class="banner error">{{ toolJsonError }}</div>
-										<div class="meta">
-											<div
-												v-for="(entry, index) in metaEntries"
-												:key="index"
-												class="meta-row">
-												<input v-model="entry.key" placeholder="key"/>
-												<input v-model="entry.value" placeholder="value"/>
-												<button class="ghost" @click="removeMeta(index)">Remove</button>
-											</div>
+									<div class="meta">
+										<div
+											v-for="(entry, index) in metaEntries"
+											:key="index"
+											class="meta-row">
+											<input v-model="entry.key" placeholder="key"/>
+											<input v-model="entry.value" placeholder="value"/>
+											<button class="ghost" @click="removeMeta(index)">Remove</button>
 										</div>
 									</div>
-									<div v-else-if="selectedServer?.allowPolicy">
+									<div v-if="toolIntentTemplate" class="intent-preview">
+										<div class="intent-label">Intent</div>
+										<div class="intent-value">{{ toolIntentDisplay }}</div>
+									</div>
+								</div>
+								<div v-else-if="selectedServer?.allowPolicy">
 										<div class="field-row">
 											<label>Policy (optional)</label>
 											<div class="field-row-actions">
@@ -1141,6 +1145,21 @@
 	);
 	let logStream;
 	const toolList = computed(() => facets.value.tools?.tools || []);
+	const toolIntentTemplate = computed(
+		() => {
+			if (!selectedToolInfo.value) return "";
+			const annotations = selectedToolInfo.value.annotations || selectedToolInfo.value.annotation || null;
+			return annotations?.intentTemplate || selectedToolInfo.value.description || "";
+		}
+	);
+	const toolIntentDisplay = computed(
+		() => {
+			const template = toolIntentTemplate.value;
+			if (!template) return "";
+			const payload = safeParseJson(toolJson.value);
+			return renderIntentTemplate(template, payload) || template;
+		}
+	);
 	const applicationList = computed(
 		() => {
 			if (Array.isArray(facets.value.applications)) return facets.value.applications;
@@ -2184,6 +2203,184 @@
 	}
 	function fillUri(template, values) {
 		return template.replace(/\{([^}]+)\}/g, (_, key) => values[key] || "");
+	}
+	function renderIntentTemplate(template, payload) {
+		if (!template) return "";
+		const data = payload && typeof payload === "object" ? payload : {};
+		if (!hasIntentValues(data)) return template;
+		const nodes = parseIntentTemplate(template);
+		const result = renderIntentNodes(nodes, data, false).text;
+		return result.replace(/\s+/g, " ").trim();
+	}
+	function parseIntentTemplate(template) {
+		let index = 0;
+		const length = template.length;
+		function parseUntil(endChar) {
+			const nodes = [];
+			let text = "";
+			while (index < length) {
+				const ch = template[index];
+				if (endChar && ch === endChar) {
+					if (text) nodes.push({ type: "text", value: text });
+					text = "";
+					index += 1;
+					break;
+				}
+				if (ch === "[") {
+					if (text) nodes.push({ type: "text", value: text });
+					text = "";
+					index += 1;
+					nodes.push({ type: "optional", nodes: parseUntil("]") });
+					continue;
+				}
+				if (ch === "{") {
+					if (text) nodes.push({ type: "text", value: text });
+					text = "";
+					index += 1;
+					let key = "";
+					while (index < length && template[index] !== "}") {
+						key += template[index];
+						index += 1;
+					}
+					if (index < length && template[index] === "}") {
+						index += 1;
+					}
+					nodes.push({ type: "placeholder", key: key.trim() });
+					continue;
+				}
+				text += ch;
+				index += 1;
+			}
+			if (text) nodes.push({ type: "text", value: text });
+			return nodes;
+		}
+		return parseUntil(null);
+	}
+	function renderIntentNodes(nodes, payload, isOptional) {
+		const arrayRoots = collectArrayRoots(nodes, payload);
+		const renderedParts = [];
+		let anyRendered = false;
+		if (!arrayRoots.length) {
+			const { text, missingRequired } = renderIntentGroup(nodes, payload, {});
+			if (isOptional && missingRequired) return { text: "", missingRequired: false };
+			if (text) {
+				renderedParts.push(text);
+				anyRendered = true;
+			}
+			return { text: renderedParts.join(""), missingRequired: false };
+		}
+		for (const root of arrayRoots) {
+			const list = Array.isArray(payload[root]) ? payload[root] : [];
+			for (let i = 0; i < list.length; i += 1) {
+				const { text, missingRequired } = renderIntentGroup(nodes, payload, { [root]: i });
+				if (isOptional && missingRequired) continue;
+				if (text) {
+					renderedParts.push(text);
+					anyRendered = true;
+				}
+				else if (!isOptional) {
+					renderedParts.push(text);
+				}
+			}
+		}
+		if (isOptional && !anyRendered) return { text: "", missingRequired: false };
+		return { text: renderedParts.join(""), missingRequired: false };
+	}
+	function renderIntentGroup(nodes, payload, indexByRoot) {
+		let text = "";
+		let missingRequired = false;
+		for (const node of nodes) {
+			if (node.type === "text") {
+				text += node.value;
+				continue;
+			}
+			if (node.type === "placeholder") {
+				const value = resolveIntentValue(payload, node.key, indexByRoot);
+				if (value == null) {
+					missingRequired = true;
+					text += `{${node.key}}`;
+				}
+				else {
+					text += value;
+				}
+				continue;
+			}
+			if (node.type === "optional") {
+				text += renderIntentNodes(node.nodes, payload, true).text;
+			}
+		}
+		return { text, missingRequired };
+	}
+	function collectArrayRoots(nodes, payload, roots = new Set()) {
+		for (const node of nodes) {
+			if (node.type === "placeholder") {
+				const key = node.key || "";
+				const root = key.split(".")[0];
+				if (root && Array.isArray(payload?.[root])) {
+					roots.add(root);
+				}
+				continue;
+			}
+			if (node.type === "optional") {
+				collectArrayRoots(node.nodes, payload, roots);
+			}
+		}
+		return Array.from(roots);
+	}
+	function hasIntentValues(payload) {
+		if (!payload || typeof payload !== "object") return false;
+		if (Array.isArray(payload)) {
+			return payload.some((value) => hasIntentValues(value));
+		}
+		return Object.values(payload).some((value) => {
+			if (value == null) return false;
+			if (typeof value === "string") return value.trim().length > 0;
+			if (typeof value === "number" || typeof value === "boolean") return true;
+			if (Array.isArray(value)) return value.length > 0 && hasIntentValues(value);
+			if (typeof value === "object") return hasIntentValues(value);
+			return false;
+		});
+	}
+	function resolveIntentValue(payload, path, indexByRoot) {
+		if (!payload || !path) return null;
+		const parts = path.split(".").filter((part) => part.trim());
+		if (!parts.length) return null;
+		let current = payload;
+		let startIndex = 0;
+		const root = parts[0];
+		if (indexByRoot && Object.prototype.hasOwnProperty.call(indexByRoot, root) && Array.isArray(payload[root])) {
+			current = payload[root][indexByRoot[root]];
+			startIndex = 1;
+		}
+		for (let i = startIndex; i < parts.length; i += 1) {
+			const part = parts[i];
+			if (current == null) return null;
+			if (Array.isArray(current)) {
+				const values = current
+					.map((item) => (item && typeof item === "object") ? item[part] : null)
+					.filter((value) => value != null && value !== "");
+				current = values.length ? values : null;
+				continue;
+			}
+			if (typeof current !== "object") return null;
+			current = current[part];
+		}
+		if (current == null) return null;
+		if (Array.isArray(current)) {
+			const values = current
+				.map((value) => {
+					if (value == null) return null;
+					if (typeof value === "string") return value.trim() ? value : null;
+					if (typeof value === "number" || typeof value === "boolean") return String(value);
+					return JSON.stringify(value);
+				})
+				.filter((value) => value);
+			return values.length ? values.join(", ") : null;
+		}
+		if (typeof current === "string") return current.trim() ? current : null;
+		if (typeof current === "number" || typeof current === "boolean") return String(current);
+		if (typeof current === "object") return JSON.stringify(current);
+		return null;
 	}
 	function getToolInputSchema(tool) {
 		if (!tool) return null;
@@ -3354,6 +3551,29 @@
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
+	}
+
+	.intent-preview {
+		margin-top: 14px;
+		padding: 12px 14px;
+		border-radius: 12px;
+		border: 1px solid rgba(148, 163, 184, 0.2);
+		background: rgba(15, 23, 30, 0.6);
+	}
+
+	.intent-label {
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: #94a3b8;
+		margin-bottom: 6px;
+	}
+
+	.intent-value {
+		font-size: 14px;
+		color: #e2e8f0;
+		line-height: 1.5;
+		word-break: break-word;
 	}
 
 	.meta-row {
