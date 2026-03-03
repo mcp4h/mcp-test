@@ -2269,17 +2269,42 @@
 			}
 			return { text: renderedParts.join(""), missingRequired: false };
 		}
+		if (!isOptional && arrayRoots.length === 1) {
+			const topLevelOptionals = nodes.filter((node) => node.type === "optional");
+			const hasSingleOptional = topLevelOptionals.length === 1;
+			const hasArrayPlaceholderOutsideOptional = nodes.some(
+				(node) => node.type === "placeholder" && arrayRoots.includes((node.key || "").split(".")[0])
+			);
+			if (hasSingleOptional && !hasArrayPlaceholderOutsideOptional) {
+				const prefixNodes = nodes.filter((node) => node.type !== "optional");
+				const prefixText = renderIntentGroup(prefixNodes, payload, {}).text;
+				const list = Array.isArray(payload[arrayRoots[0]]) ? payload[arrayRoots[0]] : [];
+				const itemParts = [];
+				for (let i = 0; i < list.length; i += 1) {
+					const { text, missingRequired } = renderIntentGroup(topLevelOptionals[0].nodes, payload, { [arrayRoots[0]]: i });
+					if (missingRequired) continue;
+					if (text) itemParts.push(text);
+				}
+				const itemText = itemParts.join(", ");
+				return { text: `${prefixText}${itemText}`, missingRequired: false };
+			}
+		}
+		let hasEntry = false;
 		for (const root of arrayRoots) {
 			const list = Array.isArray(payload[root]) ? payload[root] : [];
 			for (let i = 0; i < list.length; i += 1) {
 				const { text, missingRequired } = renderIntentGroup(nodes, payload, { [root]: i });
 				if (isOptional && missingRequired) continue;
 				if (text) {
+					if (hasEntry) renderedParts.push(", ");
 					renderedParts.push(text);
 					anyRendered = true;
+					hasEntry = true;
 				}
 				else if (!isOptional) {
+					if (hasEntry) renderedParts.push(", ");
 					renderedParts.push(text);
+					hasEntry = true;
 				}
 			}
 		}
@@ -2306,7 +2331,10 @@
 				continue;
 			}
 			if (node.type === "optional") {
-				text += renderIntentNodes(node.nodes, payload, true).text;
+				const optionalGroup = renderIntentGroup(node.nodes, payload, indexByRoot);
+				if (!optionalGroup.missingRequired) {
+					text += optionalGroup.text;
+				}
 			}
 		}
 		return { text, missingRequired };
