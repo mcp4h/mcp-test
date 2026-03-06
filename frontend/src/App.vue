@@ -346,34 +346,55 @@
 									</div>
 									<div class="panel-header">
 										<h3>Response</h3>
-										<div class="response-tabs">
-											<button :class="{ active: toolResponseTab === 'result' }" @click="toolResponseTab = 'result'">Result</button>
-											<button
-												v-for="tab in responseContentTypes"
-												:key="tab"
-												:class="{ active: toolResponseTab === tab }"
-												@click="toolResponseTab = tab">{{ tab }}</button>
-											<button :class="{ active: toolResponseTab === 'meta' }" @click="toolResponseTab = 'meta'">Meta</button>
+									<div class="response-tabs">
+										<button :class="{ active: toolResponseTab === 'result' }" @click="toolResponseTab = 'result'">Result</button>
+										<button
+											v-for="tab in responseContentTypes"
+											:key="tab"
+											:class="{ active: toolResponseTab === tab }"
+											@click="toolResponseTab = tab">{{ tab }}</button>
+										<button :class="{ active: toolResponseTab === 'meta' }" @click="toolResponseTab = 'meta'">Meta</button>
+										<button :class="{ active: toolResponseTab === 'rpc' }" @click="toolResponseTab = 'rpc'">JSON-RPC</button>
+									</div>
+								</div>
+								<div ref="toolResponseContainer" class="tool-response">
+									<div v-if="toolResponseTab === 'result'">
+										<JsonViewer
+											:value="responseResult"
+											:indent-style="indentStyle"
+											:indent-size="indentSize"/>
+									</div>
+									<div v-else-if="toolResponseTab === 'meta'" class="schema">
+										<JsonViewer
+											v-if="responseMeta"
+											:value="responseMeta"
+											:indent-style="indentStyle"
+											:indent-size="indentSize"/>
+										<div v-else class="muted">No _meta returned in the response.</div>
+									</div>
+									<div v-else-if="toolResponseTab === 'rpc'" class="rpc-panel">
+										<div class="rpc-block">
+											<div class="rpc-label">Request</div>
+											<JsonViewer
+												v-if="rawRpcRequest"
+												:value="rawRpcRequest"
+												:indent-style="indentStyle"
+												:indent-size="indentSize"/>
+											<div v-else class="muted">Raw request not available for this call.</div>
+										</div>
+										<div class="rpc-block">
+											<div class="rpc-label">Response</div>
+											<JsonViewer
+												v-if="rawRpcResponse"
+												:value="rawRpcResponse"
+												:indent-style="indentStyle"
+												:indent-size="indentSize"/>
+											<div v-else class="muted">Raw response not available for this call.</div>
 										</div>
 									</div>
-									<div ref="toolResponseContainer" class="tool-response">
-										<div v-if="toolResponseTab === 'result'">
-											<JsonViewer
-												:value="responseResult"
-												:indent-style="indentStyle"
-												:indent-size="indentSize"/>
-										</div>
-										<div v-else-if="toolResponseTab === 'meta'" class="schema">
-											<JsonViewer
-												v-if="responseMeta"
-												:value="responseMeta"
-												:indent-style="indentStyle"
-												:indent-size="indentSize"/>
-											<div v-else class="muted">No _meta returned in the response.</div>
-										</div>
-										<div v-else class="content-panel">
-											<div v-if="!contentEntriesByType(toolResponseTab).length" class="muted">No content entries for this type.</div>
-											<div v-else class="content-entry">
+									<div v-else class="content-panel">
+										<div v-if="!contentEntriesByType(toolResponseTab).length" class="muted">No content entries for this type.</div>
+										<div v-else class="content-entry">
 												<div v-if="activeContentEntry(toolResponseTab)" class="content-selected">
 													<div
 														v-if="shouldRenderMcpView(activeContentEntry(toolResponseTab))"
@@ -1063,6 +1084,7 @@
 	const selectedToolInfo = ref(null);
 	const toolJson = ref("{}");
 	const toolResponse = ref(null);
+	const lastInvokePayload = ref(null);
 	const toolResponseTab = ref("result");
 	const toolResponseContainer = ref(null);
 	const applicationContainer = ref(null);
@@ -1195,16 +1217,61 @@
 	const responseMeta = computed(
 		() => {
 			if (!toolResponse.value || typeof toolResponse.value !== "object") return null;
+			const result = toolResponse.value.result;
+			if (result && typeof result === "object") {
+				return result._meta || result.meta || null;
+			}
 			return toolResponse.value._meta || toolResponse.value.meta || null;
+		}
+	);
+	const rawRpcRequest = computed(
+		() => {
+			const response = toolResponse.value;
+			const payload = lastInvokePayload.value;
+			if (!response || typeof response !== "object" || !payload) return null;
+			const id = response.id;
+			if (id == null) return null;
+			const params = { name: payload.name };
+			if (payload.arguments != null) {
+				params.arguments = payload.arguments;
+			}
+			if (payload.meta != null) {
+				params._meta = payload.meta;
+			}
+			return { jsonrpc: "2.0", id, method: "tools/call", params };
+		}
+	);
+	const rawRpcResponse = computed(
+		() => {
+			const response = toolResponse.value;
+			if (!response || typeof response !== "object") return null;
+			if (response.jsonrpc || response.id != null || response.error || response.result) return response;
+			return null;
 		}
 	);
 	const responseContentEntries = computed(
 		() => {
 			const result = responseResult.value;
 			if (!result || typeof result !== "object") return [];
+			const meta = responseMeta.value && typeof responseMeta.value === "object"
+				? responseMeta.value
+				: null;
+			const metaEntries = [];
+			if (typeof meta?.reviewUri === "string" && meta.reviewUri) {
+				metaEntries.push({ type: "review", url: meta.reviewUri, mimeType: "text/html" });
+			}
+			if (typeof meta?.diffUri === "string" && meta.diffUri) {
+				metaEntries.push({ type: "diff", url: meta.diffUri, mimeType: "text/x-diff" });
+			}
 			const contents = result.content ?? result.contents ?? [];
-			if (!Array.isArray(contents)) return [];
-			return contents.filter((entry) => entry && typeof entry === "object");
+			if (!Array.isArray(contents)) return metaEntries;
+			const contentEntries = contents.filter((entry) => entry && typeof entry === "object");
+			if (!metaEntries.length) return contentEntries;
+			const metaTypes = new Set(metaEntries.map((entry) => entry.type));
+			return [
+				...metaEntries,
+				...contentEntries.filter((entry) => !metaTypes.has(entry.type))
+			];
 		}
 	);
 	const responseContentTypes = computed(
@@ -1887,6 +1954,7 @@
 		invokeTab.value = "input";
 		toolJson.value = "{}";
 		toolResponse.value = null;
+		lastInvokePayload.value = null;
 		toolResponseTab.value = "result";
 		metaEntries.value = [];
 		policyJson.value = "";
@@ -1908,6 +1976,12 @@
 		if (payload.error) {
 			return;
 		}
+		const parsedArgs = safeParseJson(toolJson.value) ?? {};
+		lastInvokePayload.value = {
+			name: selectedTool.value,
+			arguments: parsedArgs,
+			meta: payload.meta || null
+		};
 		toolResponse.value = await invokeTool(currentServer.value, { toolName: selectedTool.value, json: toolJson.value, meta: payload.meta });
 	}
 	function addMeta() {
@@ -3417,6 +3491,27 @@
 		display: flex;
 		flex-direction: column;
 		gap: 12px;
+	}
+
+	.rpc-panel {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.rpc-block {
+		padding: 12px;
+		border-radius: 12px;
+		border: 1px solid var(--color-border);
+		background: rgba(12, 18, 24, 0.6);
+	}
+
+	.rpc-label {
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.6px;
+		color: var(--color-muted);
+		margin-bottom: 8px;
 	}
 
 	.content-panel {
