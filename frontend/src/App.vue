@@ -3125,11 +3125,11 @@
 	}
 
 	.definition-panel {
-		min-height: calc(100vh - 280px);
+		height: calc(100vh - 280px);
 	}
 
 	.application-panel {
-		min-height: calc(100vh - 280px);
+		height: calc(100vh - 280px);
 	}
 
 	.application-panel .application-card {
