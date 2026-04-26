@@ -105,6 +105,20 @@
 									View
 								</button>
 								<button
+									v-if="server.transport === 'stdio' && !serverStatuses[server.id]?.running"
+									class="ghost"
+									@click="startServerBackground(server.id)"
+									:disabled="connectionState === 'connecting' && currentServer === server.id">
+									Start
+								</button>
+								<button
+									v-else-if="server.transport !== 'stdio' && !serverStatuses[server.id]?.running"
+									class="ghost"
+									@click="startServerBackground(server.id)"
+									:disabled="connectionState === 'connecting' && currentServer === server.id">
+									Connect
+								</button>
+								<button
 									v-if="server.transport === 'stdio' && serverStatuses[server.id]?.running"
 									class="ghost"
 									@click="restartServer(server.id)"
@@ -322,6 +336,41 @@
 											<button class="ghost" @click="removeMeta(index)">Remove</button>
 										</div>
 									</div>
+									<div class="meta">
+										<div class="field-row">
+											<label>Allowed scopes</label>
+											<div class="field-row-actions">
+												<button class="ghost" @click="addAllowedScope">Add scope</button>
+											</div>
+										</div>
+										<div v-if="!allowedScopeEntries.length" class="muted">No allowed scopes set.</div>
+										<div
+											v-for="(scope, index) in allowedScopeEntries"
+											:key="`allowed-${index}`"
+											class="meta-row">
+											<input v-model="allowedScopeEntries[index]" placeholder="execute:safe:ls"/>
+											<button class="ghost" @click="removeAllowedScope(index)">Remove</button>
+										</div>
+										<div class="field-row">
+											<label>Denied scopes</label>
+											<div class="field-row-actions">
+												<button class="ghost" @click="addDeniedScope">Add scope</button>
+											</div>
+										</div>
+										<div v-if="!deniedScopeEntries.length" class="muted">No denied scopes set.</div>
+										<div
+											v-for="(scope, index) in deniedScopeEntries"
+											:key="`denied-${index}`"
+											class="meta-row">
+											<input v-model="deniedScopeEntries[index]" placeholder="execute:unsafe"/>
+											<button class="ghost" @click="removeDeniedScope(index)">Remove</button>
+										</div>
+										<label class="toggle-button" :class="{ active: dynamicScopesEnabled }">
+											<input type="checkbox" v-model="dynamicScopesEnabled"/>
+											dynamic_scopes
+										</label>
+										<div class="muted">Allows execution when scopes are only known at runtime.</div>
+									</div>
 									<div v-if="toolIntentTemplate" class="intent-preview">
 										<div class="intent-label">Intent</div>
 										<div class="intent-value">{{ toolIntentDisplay }}</div>
@@ -355,6 +404,15 @@
 											@click="toolResponseTab = tab">{{ tab }}</button>
 										<button :class="{ active: toolResponseTab === 'meta' }" @click="toolResponseTab = 'meta'">Meta</button>
 										<button :class="{ active: toolResponseTab === 'rpc' }" @click="toolResponseTab = 'rpc'">JSON-RPC</button>
+									</div>
+									<div v-if="requestedScopesList.length" class="requested-scopes">
+										<div class="requested-scopes-label">Requested scopes</div>
+										<div class="requested-scopes-list">
+											<span
+												v-for="scope in requestedScopesList"
+												:key="scope"
+												class="meta-chip warning">{{ scope }}</span>
+										</div>
 									</div>
 								</div>
 								<div ref="toolResponseContainer" class="tool-response">
@@ -1095,10 +1153,13 @@
 	const policyJson = ref("");
 	const policyJsonError = ref("");
 	const invokeTab = ref("input");
- 	const policyDrafted = computed(
- 		() => !!(policyJson.value && policyJson.value.trim())
- 	);
+	const policyDrafted = computed(
+		() => !!(policyJson.value && policyJson.value.trim())
+	);
 	const metaEntries = ref([]);
+	const allowedScopeEntries = ref([]);
+	const deniedScopeEntries = ref([]);
+	const dynamicScopesEnabled = ref(false);
 	const savedInputs = ref([]);
 	const selectedSavedInputId = ref("");
 	const editServerId = ref("");
@@ -1222,6 +1283,31 @@
 				return result._meta || result.meta || null;
 			}
 			return toolResponse.value._meta || toolResponse.value.meta || null;
+		}
+	);
+	const requestedScopesList = computed(
+		() => {
+			const items = [];
+			const addScopes = (value) => {
+				const normalized = normalizeScopeList(value);
+				for (const scope of normalized) {
+					if (!items.includes(scope)) {
+						items.push(scope);
+					}
+				}
+			};
+			const meta = responseMeta.value;
+			const result = responseResult.value;
+			if (meta && typeof meta === "object") {
+				addScopes(meta.requested_scopes);
+			}
+			if (result && typeof result === "object") {
+				addScopes(result.requested_scopes);
+				if (result.structuredContent && typeof result.structuredContent === "object") {
+					addScopes(result.structuredContent.requested_scopes);
+				}
+			}
+			return items;
 		}
 	);
 	const rawRpcRequest = computed(
@@ -1610,6 +1696,9 @@
 		for (const server of servers.value) {
 			try {
 				statusMap[server.id] = await getStatus(server.id);
+				if (statusMap[server.id]?.initialize) {
+					applyInitializeToServer(server.id, statusMap[server.id].initialize);
+				}
 			}
 			catch {
 				statusMap[server.id] = { running: false };
@@ -1675,6 +1764,7 @@
 			newServerError.value = configParse.error;
 			return;
 		}
+		const hasConfig = configParse.value != null;
 		const supportsDynamicConfig = !!newServer.value.supportsDynamicConfig;
 		const payload = {
 			name: newServer.value.name,
@@ -1689,7 +1779,7 @@
 			env: envMap,
 			supportsDynamicConfig,
 			allowPolicy: supportsDynamicConfig ? !!newServer.value.allowPolicy : false,
-			configuration: supportsDynamicConfig ? configParse.value : null
+			configuration: configParse.value
 		};
 		try {
 			const created = await createServer(payload);
@@ -1756,7 +1846,11 @@
 			editServerError.value = configParse.error;
 			return;
 		}
-		const supportsDynamicConfig = !!editServerForm.value.supportsDynamicConfig;
+		const wasRunning = !!serverStatuses.value[id]?.running;
+		const transport = editServerForm.value.transport || "stdio";
+		const inferredConfig = !!editServerForm.value.configSchema || !!editServerForm.value.configInferred;
+		const hasConfig = configParse.value != null;
+		const supportsDynamicConfig = !!editServerForm.value.supportsDynamicConfig || inferredConfig;
 		const payload = {
 			name: editServerForm.value.name,
 			description: editServerForm.value.description,
@@ -1770,13 +1864,21 @@
 			env: parseEnv(editServerForm.value.env),
 			supportsDynamicConfig,
 			allowPolicy: supportsDynamicConfig ? !!editServerForm.value.allowPolicy : false,
-			configuration: supportsDynamicConfig ? configParse.value : null
+			configuration: configParse.value
 		};
 		try {
 			const updated = await updateServer(id, payload);
 			await loadServers();
 			if (currentServer.value === id) {
 				currentServer.value = updated.id;
+			}
+			if (wasRunning) {
+				if (transport === "stdio") {
+					await restartServer(updated.id);
+				}
+				else {
+					await reconnectServer(updated.id);
+				}
 			}
 			editServerId.value = "";
 			showEditModal.value = false;
@@ -1890,6 +1992,61 @@
 			}
 		}
 	}
+	async function startServerBackground(id) {
+		if (!id) return;
+		const isCurrent = currentServer.value === id;
+		try {
+			const updatedStatus = await startServer(id);
+			serverStatuses.value[id] = updatedStatus;
+			if (updatedStatus?.initialize) {
+				applyInitializeToServer(id, updatedStatus.initialize);
+			}
+			if (isCurrent) {
+				status.value = updatedStatus;
+				connectionState.value = updatedStatus.running ? "connected" : "idle";
+				if (updatedStatus.running) {
+					await loadFacets();
+				}
+			}
+		}
+		catch (error) {
+			serverStatuses.value[id] = { running: false };
+			if (isCurrent) {
+				connectionState.value = "error";
+				connectionError.value = error?.message || "Failed to start server.";
+				status.value = { running: false, capabilities: null, initialize: null };
+				activeTab.value = "Raw Log";
+			}
+		}
+	}
+	function applyInitializeToServer(serverId, initialize) {
+		if (!serverId || !initialize) return;
+		const schema = initialize.configSchema || null;
+		const policySupported = !!initialize?.capabilities?.experimental?.policy;
+		const index = servers.value.findIndex((server) => server.id === serverId);
+		if (index >= 0) {
+			const current = servers.value[index];
+			servers.value[index] = {
+				...current,
+				configSchema: schema || current.configSchema,
+				supportsDynamicConfig: schema ? true : current.supportsDynamicConfig,
+				configInferred: schema ? true : current.configInferred,
+				allowPolicy: policySupported ? true : current.allowPolicy,
+				policyInferred: policySupported ? true : current.policyInferred
+			};
+		}
+		if (showEditModal.value && editServerId.value === serverId) {
+			if (schema) {
+				editServerForm.value.configSchema = schema;
+				editServerForm.value.supportsDynamicConfig = true;
+				editServerForm.value.configInferred = true;
+			}
+			if (policySupported) {
+				editServerForm.value.allowPolicy = true;
+				editServerForm.value.policyInferred = true;
+			}
+		}
+	}
 	async function reconnectServer(id) {
 		if (!id) return;
 		const server = servers.value.find((item) => item.id === id);
@@ -1957,6 +2114,9 @@
 		lastInvokePayload.value = null;
 		toolResponseTab.value = "result";
 		metaEntries.value = [];
+		allowedScopeEntries.value = [];
+		deniedScopeEntries.value = [];
+		dynamicScopesEnabled.value = false;
 		policyJson.value = "";
 		policyJsonError.value = "";
 		currentLoadedSavedId.value = "";
@@ -1989,6 +2149,18 @@
 	}
 	function removeMeta(index) {
 		metaEntries.value.splice(index, 1);
+	}
+	function addAllowedScope() {
+		allowedScopeEntries.value.push("");
+	}
+	function removeAllowedScope(index) {
+		allowedScopeEntries.value.splice(index, 1);
+	}
+	function addDeniedScope() {
+		deniedScopeEntries.value.push("");
+	}
+	function removeDeniedScope(index) {
+		deniedScopeEntries.value.splice(index, 1);
 	}
 	function formatToolJson() {
 		try {
@@ -2127,8 +2299,11 @@
 	function loadSavedInput(input) {
 		toolJson.value = input.json || "{}";
 		const meta = input.meta && typeof input.meta === "object" && !Array.isArray(input.meta) ? input.meta : {};
-		metaEntries.value = Object.entries(meta)
-			.map(([key, value]) => ({ key, value: value == null ? "" : String(value) }));
+		const scoped = splitMetaFields(meta);
+		metaEntries.value = scoped.entries;
+		allowedScopeEntries.value = scoped.allowed;
+		deniedScopeEntries.value = scoped.denied;
+		dynamicScopesEnabled.value = scoped.dynamic;
 		policyJson.value = input.policy ? formatJsonValue(input.policy) : "";
 		policyJsonError.value = "";
 		currentLoadedSavedId.value = input.id || "";
@@ -2520,6 +2695,24 @@
 		if (type === "boolean") return false;
 		return "";
 	}
+	function normalizeScopeList(value) {
+		if (Array.isArray(value)) {
+			return value
+				.map((entry) => (entry == null ? "" : String(entry)).trim())
+				.filter((entry) => entry);
+		}
+		if (typeof value === "string") {
+			const trimmed = value.trim();
+			return trimmed ? [trimmed] : [];
+		}
+		return [];
+	}
+	function normalizeScopeEntries(entries) {
+		if (!Array.isArray(entries)) return [];
+		return entries
+			.map((entry) => (entry == null ? "" : String(entry)).trim())
+			.filter((entry) => entry);
+	}
 	function buildMetaObject() {
 		const meta = metaEntries.value
 			.map((entry) => ({ key: (entry.key || "").trim(), value: entry.value == null ? "" : String(entry.value) }))
@@ -2531,6 +2724,17 @@
 				},
 				{}
 			);
+		const allowed = normalizeScopeEntries(allowedScopeEntries.value);
+		if (allowed.length) {
+			meta.allowed_scopes = allowed;
+		}
+		const denied = normalizeScopeEntries(deniedScopeEntries.value);
+		if (denied.length) {
+			meta.denied_scopes = denied;
+		}
+		if (dynamicScopesEnabled.value) {
+			meta.dynamic_scopes = true;
+		}
 		return Object.keys(meta).length ? meta : null;
 	}
 	function buildMetaPayload() {
@@ -2548,25 +2752,49 @@
 		}
 		return { meta: Object.keys(meta).length ? meta : null, error: null };
 	}
+	function splitMetaFields(meta) {
+		const allowed = normalizeScopeList(meta.allowed_scopes);
+		const denied = normalizeScopeList(meta.denied_scopes);
+		const dynamic = meta.dynamic_scopes === true;
+		const entries = Object.entries(meta)
+			.filter(([key, value]) => {
+				if (["policy", "allowed_scopes", "denied_scopes", "dynamic_scopes"].includes(key)) {
+					return false;
+				}
+				if (value != null && typeof value === "object") {
+					return false;
+				}
+				return true;
+			})
+			.map(([key, value]) => ({ key, value: value == null ? "" : String(value) }));
+		return { allowed, denied, dynamic, entries };
+	}
 	function extractMetaFromJson(text) {
 		try {
 			const parsed = JSON.parse(text || "{}");
 			const rawMeta = parsed && typeof parsed === "object" ? (parsed._meta || parsed.meta) : null;
 			if (!rawMeta || typeof rawMeta !== "object") return null;
-			const meta = Object.entries(rawMeta)
-				.reduce(
-					(acc, [key, value]) => {
-						if (key === "policy") {
-							return acc;
-						}
-						if (value != null && typeof value === "object") {
-							return acc;
-						}
-						acc[String(key)] = value == null ? "" : String(value);
-						return acc;
-					},
-					{}
-				);
+			const meta = {};
+			const allowed = normalizeScopeList(rawMeta.allowed_scopes);
+			if (allowed.length) {
+				meta.allowed_scopes = allowed;
+			}
+			const denied = normalizeScopeList(rawMeta.denied_scopes);
+			if (denied.length) {
+				meta.denied_scopes = denied;
+			}
+			if (rawMeta.dynamic_scopes === true) {
+				meta.dynamic_scopes = true;
+			}
+			Object.entries(rawMeta).forEach(([key, value]) => {
+				if (["policy", "allowed_scopes", "denied_scopes", "dynamic_scopes"].includes(key)) {
+					return;
+				}
+				if (value != null && typeof value === "object") {
+					return;
+				}
+				meta[String(key)] = value == null ? "" : String(value);
+			});
 			return Object.keys(meta).length ? meta : null;
 		}
 		catch {
@@ -2729,31 +2957,7 @@
 		() => status.value.initialize,
 		(value) => {
 			if (!currentServer.value || !value) return;
-			const schema = value.configSchema || null;
-			const policySupported = !!value?.capabilities?.experimental?.policy;
-			const index = servers.value.findIndex((server) => server.id === currentServer.value);
-			if (index >= 0) {
-				const current = servers.value[index];
-				servers.value[index] = {
-					...current,
-					configSchema: schema || current.configSchema,
-					supportsDynamicConfig: schema ? true : current.supportsDynamicConfig,
-					configInferred: schema ? true : current.configInferred,
-					allowPolicy: policySupported ? true : current.allowPolicy,
-					policyInferred: policySupported ? true : current.policyInferred
-				};
-			}
-			if (showEditModal.value && editServerId.value === currentServer.value) {
-				if (schema) {
-					editServerForm.value.configSchema = schema;
-					editServerForm.value.supportsDynamicConfig = true;
-					editServerForm.value.configInferred = true;
-				}
-				if (policySupported) {
-					editServerForm.value.allowPolicy = true;
-					editServerForm.value.policyInferred = true;
-				}
-			}
+			applyInitializeToServer(currentServer.value, value);
 		}
 	);
 	watch(
@@ -2761,7 +2965,6 @@
 		(value) => {
 			if (!value) {
 				newServer.value.allowPolicy = false;
-				newServer.value.configJson = "";
 				newServerTab.value = "connection";
 			}
 		}
@@ -2771,7 +2974,6 @@
 		(value) => {
 			if (!value) {
 				editServerForm.value.allowPolicy = false;
-				editServerForm.value.configJson = "";
 				editServerTab.value = "connection";
 			}
 		}
@@ -3977,6 +4179,32 @@
 		background: rgba(56, 189, 248, 0.14);
 		border: 1px solid rgba(56, 189, 248, 0.55);
 		color: #7dd3fc;
+	}
+
+	.meta-chip.warning {
+		background: rgba(251, 191, 36, 0.18);
+		border-color: rgba(251, 191, 36, 0.55);
+		color: #fde68a;
+	}
+
+	.requested-scopes {
+		margin-top: 10px;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.requested-scopes-label {
+		font-size: 12px;
+		text-transform: uppercase;
+		letter-spacing: 0.6px;
+		color: var(--color-muted);
+	}
+
+	.requested-scopes-list {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
 	}
 
 	.modal-overlay {

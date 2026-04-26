@@ -58,6 +58,7 @@ public class McpResource {
 	@Path("/{serverName}")
 	public ServerConfig updateServer(@PathParam("serverName") String serverName, UpdateServerRequest request) {
 		ServerConfig config = repository.get(serverName).orElseThrow();
+		boolean hasConfiguration = request.configuration != null && !request.configuration.isNull();
 		String newName = request.name != null && !request.name.isBlank() ? request.name.trim() : config.name;
 		String newId = ServerNames.toId(newName);
 		if (newId.isBlank()) {
@@ -96,12 +97,11 @@ public class McpResource {
 		}
 		if (request.supportsDynamicConfig != null) {
 			config.supportsDynamicConfig = request.supportsDynamicConfig;
-			config.configuration = request.configuration;
 		}
 		if (request.allowPolicy != null) {
 			config.allowPolicy = request.allowPolicy;
 		}
-		if (request.supportsDynamicConfig == null && request.configuration != null) {
+		if (hasConfiguration) {
 			config.configuration = request.configuration;
 		}
 		if (!newId.equals(serverName)) {
@@ -395,12 +395,24 @@ public class McpResource {
 	}
 
 	private void updateConfigSchemaFromInitialize(ServerConfig config, JsonNode initialize) {
-		if (config == null || !config.supportsDynamicConfig || initialize == null) {
+		if (config == null || initialize == null) {
 			return;
 		}
 		JsonNode schema = initialize.get("configSchema");
 		if (schema != null && !schema.isNull()) {
 			config.configSchema = schema;
+			config.supportsDynamicConfig = true;
+		}
+		else {
+			config.configSchema = null;
+			config.supportsDynamicConfig = false;
+		}
+		JsonNode policyNode = initialize.path("capabilities").path("experimental").path("policy");
+		if (policyNode.isBoolean() && policyNode.asBoolean()) {
+			config.allowPolicy = true;
+		}
+		else {
+			config.allowPolicy = false;
 		}
 	}
 
