@@ -271,9 +271,11 @@
 						<div v-if="!selectedApplication" class="muted">Select an application to launch.</div>
 						<div v-else class="content-selected">
 							<div ref="applicationContainer" class="application-container">
-								<mcp-view
+							<mcp-view
+									defer
 									:class="['content-mcp-view', { fullscreen: isIframeFullscreen }]"
-									:src="selectedApplication.uri"></mcp-view>
+									:src="selectedApplication.uri"
+									:resource-base="resourceBase"></mcp-view>
 							</div>
 						</div>
 					</div>
@@ -436,20 +438,21 @@
 									</div>
 									<div class="panel-header">
 										<h3>Response</h3>
-									<div class="response-tabs">
-										<button :class="{ active: toolResponseTab === 'result' }" @click="toolResponseTab = 'result'">Result</button>
-										<button
-											v-for="tab in responseContentTypes"
-											:key="tab"
-											:class="{ active: toolResponseTab === tab }"
-											@click="toolResponseTab = tab">{{ tab }}</button>
-										<button :class="{ active: toolResponseTab === 'meta' }" @click="toolResponseTab = 'meta'">Meta</button>
-										<button :class="{ active: toolResponseTab === 'rpc' }" @click="toolResponseTab = 'rpc'">JSON-RPC</button>
-									</div>
-									<div v-if="requestedScopesList.length" class="requested-scopes">
-										<div class="requested-scopes-label">Requested scopes</div>
-										<div class="requested-scopes-list">
-											<span
+								<div class="response-tabs">
+									<button :class="{ active: toolResponseTab === 'result' }" @click="toolResponseTab = 'result'">Result</button>
+									<button
+										v-for="tab in responseContentTypes"
+										:key="tab"
+										:class="{ active: toolResponseTab === tab }"
+										@click="toolResponseTab = tab">{{ tab }}</button>
+									<button :class="{ active: toolResponseTab === 'meta' }" @click="toolResponseTab = 'meta'">Meta</button>
+									<button :class="{ active: toolResponseTab === 'rpc' }" @click="toolResponseTab = 'rpc'">JSON-RPC</button>
+								</div>
+								<div v-if="responseDisplayMessage" class="banner notice">{{ responseDisplayMessage }}</div>
+								<div v-if="requestedScopesList.length" class="requested-scopes">
+									<div class="requested-scopes-label">Requested scopes</div>
+									<div class="requested-scopes-list">
+										<span
 												v-for="scope in requestedScopesList"
 												:key="scope"
 												class="meta-chip warning">{{ scope }}</span>
@@ -501,10 +504,12 @@
 														<button class="ghost" @click="toggleIframeFullscreen">{{ isIframeFullscreen ? "Leave Full Screen" : "Full Screen" }}</button>
 													</div>
 													<div v-if="isContentLoading(toolResponseTab)" class="muted">Loading resource...</div>
-													<mcp-view
-														v-show="shouldShowIframeForTab(toolResponseTab)"
-														:class="['content-mcp-view', { fullscreen: isIframeFullscreen }]"
-														:src="activeContentEntry(toolResponseTab)?.url || ''"></mcp-view>
+								<mcp-view
+									v-show="shouldShowIframeForTab(toolResponseTab)"
+									defer
+									:class="['content-mcp-view', { fullscreen: isIframeFullscreen }]"
+									:src="activeContentEntry(toolResponseTab)?.url || ''"
+									:resource-base="resourceBase"></mcp-view>
 													<pre
 														v-if="!shouldShowIframeForTab(toolResponseTab) && isDiffEntry(activeContentEntry(toolResponseTab))"
 														class="content-diff">
@@ -1472,6 +1477,19 @@
 			return toolResponse.value._meta || toolResponse.value.meta || null;
 		}
 	);
+	const responseDisplayMessage = computed(
+		() => {
+			const meta = responseMeta.value;
+			if (!meta || typeof meta !== "object") return "";
+			return typeof meta.displayMessage === "string" ? meta.displayMessage : "";
+		}
+	);
+	const resourceBase = computed(
+		() => {
+			if (!currentServer.value) return "";
+			return `${API_BASE}/servers/${currentServer.value}/resource?uri={uri}`;
+		}
+	);
 	const requestedScopesList = computed(
 		() => {
 			const items = [];
@@ -1522,6 +1540,17 @@
 			return null;
 		}
 	);
+	function normalizeContentEntry(entry) {
+		if (!entry || typeof entry !== "object") return null;
+		const normalized = { ...entry };
+		if (!normalized.url && typeof normalized.uri === "string") {
+			normalized.url = normalized.uri;
+		}
+		if (!normalized.url && typeof normalized.resourceUri === "string") {
+			normalized.url = normalized.resourceUri;
+		}
+		return normalized;
+	}
 	const responseContentEntries = computed(
 		() => {
 			const result = responseResult.value;
@@ -1530,6 +1559,15 @@
 				? responseMeta.value
 				: null;
 			const metaEntries = [];
+			const uiMeta = meta?.ui && typeof meta.ui === "object" ? meta.ui : null;
+			if (typeof uiMeta?.resourceUri === "string" && uiMeta.resourceUri) {
+				metaEntries.push({
+					type: typeof uiMeta?.type === "string" && uiMeta.type ? uiMeta.type : "review",
+					url: uiMeta.resourceUri,
+					mimeType: "text/html",
+					csp: uiMeta.csp && typeof uiMeta.csp === "object" ? uiMeta.csp : null
+				});
+			}
 			if (typeof meta?.reviewUri === "string" && meta.reviewUri) {
 				metaEntries.push({ type: "review", url: meta.reviewUri, mimeType: "text/html" });
 			}
@@ -1538,7 +1576,9 @@
 			}
 			const contents = result.content ?? result.contents ?? [];
 			if (!Array.isArray(contents)) return metaEntries;
-			const contentEntries = contents.filter((entry) => entry && typeof entry === "object");
+			const contentEntries = contents
+				.map((entry) => normalizeContentEntry(entry))
+				.filter((entry) => entry && typeof entry === "object");
 			if (!metaEntries.length) return contentEntries;
 			const metaTypes = new Set(metaEntries.map((entry) => entry.type));
 			return [
@@ -1576,6 +1616,7 @@
 	}
 	function effectiveMimeType(entry) {
 		if (entry?.mimeType && typeof entry.mimeType === "string") return entry.mimeType;
+		if (entry?.mediaType && typeof entry.mediaType === "string") return entry.mediaType;
 		if (entry?.type === "review") return "text/html";
 		if (entry?.type === "diff") return "text/x-diff";
 		return "";
@@ -1623,6 +1664,54 @@
 		const key = activeContentKey(type);
 		return key ? Boolean(activeContentLoading.value[key]) : false;
 	}
+	function normalizeCspDomains(value) {
+		if (Array.isArray(value)) {
+			return value.map((entry) => (entry == null ? "" : String(entry)).trim()).filter((entry) => entry);
+		}
+		if (typeof value === "string") {
+			const trimmed = value.trim();
+			return trimmed ? [trimmed] : [];
+		}
+		return [];
+	}
+	function cspAllowedOrigins(csp) {
+		if (!csp || typeof csp !== "object") return [];
+		const domains = [
+			...normalizeCspDomains(csp.resource_domains),
+			...normalizeCspDomains(csp.connect_domains)
+		];
+		return Array.from(new Set(domains));
+	}
+	function cspSourceList(domains) {
+		const entries = Array.isArray(domains) ? domains : [];
+		const cleaned = entries
+			.map((value) => (value == null ? "" : String(value)).trim())
+			.filter((value) => value);
+		return Array.from(new Set(cleaned));
+	}
+	function buildCspPolicy(csp) {
+		if (!csp || typeof csp !== "object") return "";
+		const resourceDomains = cspSourceList(csp.resource_domains);
+		const connectDomains = cspSourceList(csp.connect_domains);
+		const baseSources = resourceDomains.length ? resourceDomains : [];
+		const connectSources = connectDomains.length ? connectDomains : baseSources;
+		const join = (sources, extras = []) => {
+			const values = [...extras, ...sources];
+			return values.length ? values.join(" ") : "'none'";
+		};
+		return [
+			"default-src 'none'",
+			`script-src ${join(baseSources, ["'unsafe-inline'"])}`,
+			`style-src ${join(baseSources, ["'unsafe-inline'"])}`,
+			`img-src ${join(baseSources, ["data:", "blob:"])}`,
+			`font-src ${join(baseSources, ["data:"])}`,
+			`connect-src ${join(connectSources)}`,
+			`media-src ${join(baseSources, ["data:", "blob:"])}`,
+			`frame-src ${join(baseSources)}`,
+			"base-uri 'none'",
+			"object-src 'none'"
+		].join("; ");
+	}
 	function normalizeContentText(value) {
 		if (typeof value === "string") return value;
 		if (value instanceof Uint8Array) return new TextDecoder().decode(value);
@@ -1643,6 +1732,7 @@
 	async function loadContentForType(type) {
 		const entry = activeContentEntry(type);
 		if (!entry || !hasContentUrl(entry)) return;
+		if (!isUiContent(entry)) return;
 		const key = activeContentKey(type);
 		if (!key || activeContentPayloads.value[key]) return;
 		console.info("[mcp-test] load content for tab", { type, url: entry.url });
@@ -1750,18 +1840,157 @@
 			"--mcp-ring-color": "rgba(249, 115, 22, 0.35)"
 		};
 	}
+	let cachedThemeVars = null;
+	let cachedHostContext = null;
+	function getMcpThemeVars() {
+		if (!cachedThemeVars) {
+			cachedThemeVars = mcpThemeVars();
+		}
+		return cachedThemeVars;
+	}
+	function mcpHostContext() {
+		const legacy = getMcpThemeVars();
+		return {
+			theme: "dark",
+			styles: {
+				variables: {
+					"--color-background-primary": legacy["--mcp-color-bg"],
+					"--color-background-secondary": legacy["--mcp-surface"],
+					"--color-background-tertiary": legacy["--mcp-surface-alt"],
+					"--color-background-inverse": legacy["--mcp-color-fg"],
+					"--color-background-ghost": "transparent",
+					"--color-background-info": legacy["--mcp-color-secondary"],
+					"--color-background-danger": legacy["--mcp-color-danger"],
+					"--color-background-success": legacy["--mcp-color-success"],
+					"--color-background-warning": legacy["--mcp-color-warning"],
+					"--color-background-disabled": legacy["--mcp-color-muted"],
+					"--color-text-primary": legacy["--mcp-color-fg"],
+					"--color-text-secondary": legacy["--mcp-color-muted-fg"],
+					"--color-text-tertiary": legacy["--mcp-color-muted"],
+					"--color-text-inverse": legacy["--mcp-color-bg"],
+					"--color-text-ghost": legacy["--mcp-color-muted"],
+					"--color-text-info": legacy["--mcp-color-secondary"],
+					"--color-text-danger": legacy["--mcp-color-danger"],
+					"--color-text-success": legacy["--mcp-color-success"],
+					"--color-text-warning": legacy["--mcp-color-warning"],
+					"--color-text-disabled": legacy["--mcp-color-muted"],
+					"--color-border": legacy["--mcp-color-border"],
+					"--color-border-primary": legacy["--mcp-color-border"],
+					"--color-border-secondary": legacy["--mcp-color-border-strong"],
+					"--color-border-tertiary": legacy["--mcp-color-border"],
+					"--color-border-inverse": legacy["--mcp-color-fg"],
+					"--color-border-ghost": "transparent",
+					"--color-border-info": legacy["--mcp-color-secondary"],
+					"--color-border-danger": legacy["--mcp-color-danger"],
+					"--color-border-success": legacy["--mcp-color-success"],
+					"--color-border-warning": legacy["--mcp-color-warning"],
+					"--color-border-disabled": legacy["--mcp-color-muted"],
+					"--color-ring-primary": legacy["--mcp-color-fg"],
+					"--color-ring-secondary": legacy["--mcp-color-muted-fg"],
+					"--color-ring-inverse": legacy["--mcp-color-bg"],
+					"--color-ring-info": legacy["--mcp-color-secondary"],
+					"--color-ring-danger": legacy["--mcp-color-danger"],
+					"--color-ring-success": legacy["--mcp-color-success"],
+					"--color-ring-warning": legacy["--mcp-color-warning"],
+					"--color-background-accent": legacy["--mcp-color-primary"],
+					"--color-text-accent": legacy["--mcp-color-primary-fg"],
+					"--border-radius-md": "10px",
+					"--shadow-md": "0 18px 48px rgba(0, 0, 0, 0.32)",
+					...legacy
+				},
+				css: {
+					fonts: ""
+				}
+			}
+		};
+	}
+	function getMcpHostContext() {
+		if (!cachedHostContext) {
+			cachedHostContext = mcpHostContext();
+		}
+		return cachedHostContext;
+	}
+	function toCloneable(value) {
+		if (value == null) return null;
+		try {
+			return JSON.parse(JSON.stringify(value));
+		}
+		catch {
+			return null;
+		}
+	}
+	function safeStringify(value) {
+		try {
+			return JSON.stringify(value);
+		}
+		catch {
+			return "";
+		}
+	}
 	function applyMcpViewResolvers() {
 		const containers = [toolResponseContainer.value, applicationContainer.value].filter(Boolean);
 		if (!containers.length) return;
+		const toolEntry = activeContentEntry(toolResponseTab.value);
+		const toolCsp = toolEntry?.csp;
+		const toolAllowedOrigins = cspAllowedOrigins(toolCsp);
+		const toolCspPolicy = buildCspPolicy(toolCsp);
+		const toolResultRaw = responseResult.value && typeof responseResult.value === "object" ? responseResult.value : null;
+		const toolInput = lastInvokePayload.value?.arguments ?? null;
+		const toolDataRaw = toolInput != null
+			? {
+				tool: {
+					name: lastInvokePayload.value?.name || selectedTool.value,
+					arguments: toolInput
+				},
+				result: toolResultRaw,
+				meta: responseMeta.value
+			}
+			: null;
+		const toolResult = toCloneable(toolResultRaw);
+		const toolData = toCloneable(toolDataRaw);
+		const toolResultKey = toolResult ? safeStringify(toolResult) : "";
+		const toolDataKey = toolData ? safeStringify(toolData) : "";
 		containers.forEach(
 			(container) => {
 				const views = container.querySelectorAll("mcp-view");
+				const isToolView = container === toolResponseContainer.value;
 				views.forEach(
 					(view) => {
 						console.info("[mcp-test] attach resolver", { src: view.getAttribute("src") });
-						view.resolver = mcpResolver;
-						view.toolCaller = mcpToolCaller;
-						view.css = mcpThemeVars();
+						if (view.hasAttribute("defer")) {
+							view.deferRender = true;
+						}
+						const resolver = view.getAttribute("resource-base") ? null : mcpResolver;
+						if (view.resolver !== resolver) view.resolver = resolver;
+						if (view.toolCaller !== mcpToolCaller) view.toolCaller = mcpToolCaller;
+						const css = getMcpThemeVars();
+						if (view.css !== css) view.css = css;
+						const hostContext = getMcpHostContext();
+						const hostTheme = hostContext?.theme || null;
+						const hostVars = hostContext?.styles?.variables || null;
+						const hostFonts = hostContext?.styles?.css?.fonts || null;
+						console.info("[mcp-test] host style vars", { hostTheme, hostVars, hostFonts });
+						if (view.hostTheme !== hostTheme) view.hostTheme = hostTheme;
+						if (view.hostStyleVariables !== hostVars) view.hostStyleVariables = hostVars;
+						if (view.hostFonts !== hostFonts) view.hostFonts = hostFonts;
+						const nextAllowed = isToolView ? toolAllowedOrigins : [];
+						if (view.allowedOrigins !== nextAllowed) view.allowedOrigins = nextAllowed;
+						const nextCsp = isToolView ? toolCspPolicy : "";
+						if (view.csp !== nextCsp) view.csp = nextCsp;
+						const dataKey = isToolView ? toolDataKey : "";
+						if (view.dataset.mcpToolDataKey !== dataKey) {
+							view.dataset.mcpToolDataKey = dataKey;
+							view.data = isToolView ? toolData : null;
+						}
+						const resultKey = isToolView ? toolResultKey : "";
+						if (view.dataset.mcpToolResultKey !== resultKey) {
+							view.dataset.mcpToolResultKey = resultKey;
+							view.toolResult = isToolView ? toolResult : null;
+						}
+						if (view.deferRender) {
+							view.deferRender = false;
+							view.render();
+						}
 					}
 				);
 			}

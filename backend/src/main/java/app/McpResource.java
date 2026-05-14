@@ -13,6 +13,7 @@ import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import org.jboss.resteasy.reactive.RestStreamElementType;
 import jakarta.ws.rs.core.Response;
@@ -21,6 +22,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Base64;
 import java.util.function.Supplier;
 import java.util.concurrent.TimeUnit;
 
@@ -254,6 +256,22 @@ public class McpResource {
 		return result;
 	}
 
+	@GET
+	@Path("/{serverName}/resource")
+	@Produces(MediaType.WILDCARD)
+	public Response readResourceProxy(@PathParam("serverName") String serverName, @QueryParam("uri") String uri) throws Exception {
+		if (uri == null || uri.isBlank()) {
+			return Response.status(Response.Status.BAD_REQUEST).entity("Missing uri").type(MediaType.TEXT_PLAIN).build();
+		}
+		ServerSession session = requireSession(serverName);
+		logRpcRequest(session, "resources/read", buildResourceParams(uri));
+		JsonNode result = session.client
+			.readResource(uri)
+			.get(REQUEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+		logRpcResponse(session, "resources/read", result);
+		return buildResourceResponse(result, uri);
+	}
+
 	@POST
 	@Path("/{serverName}/prompt")
 	public JsonNode getPrompt(@PathParam("serverName") String serverName, PromptRequest request) throws Exception {
@@ -438,6 +456,68 @@ public class McpResource {
 		ObjectNode params = mapper.createObjectNode();
 		params.put("uri", uri);
 		return params;
+	}
+
+	private Response buildResourceResponse(JsonNode result, String uri) {
+		if (result == null || result.isNull()) {
+			return Response.status(Response.Status.NOT_FOUND).entity("Resource not found").type(MediaType.TEXT_PLAIN).build();
+		}
+		JsonNode contentNode = result.get("contents");
+		if (contentNode == null || contentNode.isNull()) {
+			contentNode = result.get("content");
+		}
+		JsonNode entry = null;
+		if (contentNode != null && contentNode.isArray() && contentNode.size() > 0) {
+			entry = contentNode.get(0);
+		}
+		else if (contentNode != null && contentNode.isObject()) {
+			entry = contentNode;
+		}
+		if (entry == null || entry.isNull()) {
+			if (result.isTextual()) {
+				return Response.ok(result.asText()).type(MediaType.TEXT_PLAIN).build();
+			}
+			return Response.status(Response.Status.NOT_FOUND).entity("Resource not found").type(MediaType.TEXT_PLAIN).build();
+		}
+		String mimeType = textValue(entry.get("mimeType"));
+		if (mimeType == null || mimeType.isBlank()) {
+			mimeType = guessMimeType(uri);
+		}
+		JsonNode textNode = entry.get("text");
+		if (textNode != null && textNode.isTextual()) {
+			return Response.ok(textNode.asText()).type(mimeType).build();
+		}
+		String base64 = textValue(entry.get("base64"));
+		if (base64 == null || base64.isBlank()) {
+			base64 = textValue(entry.get("bytes"));
+		}
+		if (base64 == null || base64.isBlank()) {
+			base64 = textValue(entry.get("data"));
+		}
+		if (base64 != null && !base64.isBlank()) {
+			byte[] decoded = Base64.getDecoder().decode(base64);
+			return Response.ok(decoded).type(mimeType).build();
+		}
+		return Response.status(Response.Status.NOT_FOUND).entity("Resource not found").type(MediaType.TEXT_PLAIN).build();
+	}
+
+	private String guessMimeType(String uri) {
+		if (uri == null) return MediaType.APPLICATION_OCTET_STREAM;
+		String lower = uri.toLowerCase();
+		if (lower.endsWith(".html") || lower.endsWith(".htm")) return MediaType.TEXT_HTML;
+		if (lower.endsWith(".css")) return "text/css";
+		if (lower.endsWith(".js") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) return "text/javascript";
+		if (lower.endsWith(".json")) return MediaType.APPLICATION_JSON;
+		if (lower.endsWith(".svg")) return "image/svg+xml";
+		if (lower.endsWith(".png")) return "image/png";
+		if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+		if (lower.endsWith(".gif")) return "image/gif";
+		if (lower.endsWith(".webp")) return "image/webp";
+		if (lower.endsWith(".woff")) return "font/woff";
+		if (lower.endsWith(".woff2")) return "font/woff2";
+		if (lower.endsWith(".ttf")) return "font/ttf";
+		if (lower.endsWith(".otf")) return "font/otf";
+		return MediaType.APPLICATION_OCTET_STREAM;
 	}
 
 	private ObjectNode buildPromptParams(String name, JsonNode args) {
