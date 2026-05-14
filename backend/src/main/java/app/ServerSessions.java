@@ -15,13 +15,16 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ServerSessions {
 	private final ServerRepository repository;
 	private final ObjectMapper mapper;
+	private final OAuthService oauth;
 	private final Map<String, ServerSession> sessions = new ConcurrentHashMap<>();
 	private final Map<String, LogBroadcaster> logStreams = new ConcurrentHashMap<>();
+	private final Map<String, String> mcpSessionIds = new ConcurrentHashMap<>();
 
 	@Inject
-	public ServerSessions(ServerRepository repository, ObjectMapper mapper) {
+	public ServerSessions(ServerRepository repository, ObjectMapper mapper, OAuthService oauth) {
 		this.repository = repository;
 		this.mapper = mapper;
+		this.oauth = oauth;
 	}
 
 	public ServerSession start(String serverId) {
@@ -31,8 +34,12 @@ public class ServerSessions {
 				ServerConfig config = repository.get(id).orElseThrow();
 				if ("sse".equalsIgnoreCase(config.transport) || "streamable".equalsIgnoreCase(config.transport)) {
 					LogBroadcaster logStream = logStreamFor(id);
-					McpClient client = createHttpClient(config, logStream);
+					McpClient client = createHttpClient(id, config, logStream);
 					ServerSession session = new ServerSession(config, null, client, logStream);
+					String sessionId = mcpSessionIds.get(id);
+					if (sessionId != null && !sessionId.isBlank()) {
+						session.mcpSessionId = sessionId;
+					}
 					logStream.publish(ts() + " created http session " + config.httpUrl);
 					return session;
 				}
@@ -130,13 +137,65 @@ public class ServerSessions {
 		return Instant.now().toString();
 	}
 
-	private McpClient createHttpClient(ServerConfig config, LogBroadcaster logStream) {
+	private McpClient createHttpClient(String serverId, ServerConfig config, LogBroadcaster logStream) {
+		java.util.function.Supplier<Map<String, String>> headerSupplier = () -> buildHeaders(serverId, config);
+		java.util.function.Consumer<String> unauthorizedHandler = header -> {
+			String headersDump;
+			if (header == null || header.isBlank()) {
+				headersDump = "WWW-Authenticate=(missing)";
+				logStream.publish(ts() + " auth 401 missing WWW-Authenticate header");
+			}
+			else {
+				headersDump = "WWW-Authenticate=" + header;
+				logStream.publish(ts() + " auth 401 WWW-Authenticate=" + header);
+			}
+			oauth.recordAuthHeaders(serverId, headersDump);
+			oauth.handleUnauthorized(serverId, header, config.httpUrl);
+		};
+		java.util.function.Consumer<String> sessionIdSink = value -> {
+			if (value == null || value.isBlank()) {
+				return;
+			}
+			mcpSessionIds.put(serverId, value);
+			ServerSession session = sessions.get(serverId);
+			if (session != null) {
+				session.mcpSessionId = value;
+			}
+			logStream.publish(ts() + " mcp-session-id=" + value);
+		};
+		java.util.function.Consumer<String> headersSink = dump -> oauth.recordAuthHeaders(serverId, dump);
 		if ("sse".equalsIgnoreCase(config.transport)) {
-			return new SseMcpClient(mapper, config.httpUrl, config.httpMessageUrl, config.httpHeaders,
-          msg -> logStream.publish(ts() + " " + msg));
+			return new SseMcpClient(
+				mapper,
+				config.httpUrl,
+				config.httpMessageUrl,
+				headerSupplier,
+				msg -> logStream.publish(ts() + " " + msg),
+				unauthorizedHandler,
+				headersSink,
+				sessionIdSink);
 		}
-		return new StreamableHttpMcpClient(mapper, config.httpUrl, config.httpHeaders,
-        msg -> logStream.publish(ts() + " " + msg));
+		return new StreamableHttpMcpClient(
+			mapper,
+			config.httpUrl,
+			headerSupplier,
+			msg -> logStream.publish(ts() + " " + msg),
+			unauthorizedHandler,
+			headersSink,
+			sessionIdSink);
+	}
+
+	private Map<String, String> buildHeaders(String serverId, ServerConfig config) {
+		Map<String, String> headers = new java.util.HashMap<>();
+		if (config.httpHeaders != null && !config.httpHeaders.isEmpty()) {
+			headers.putAll(config.httpHeaders);
+		}
+		String sessionId = mcpSessionIds.get(serverId);
+		if (sessionId != null && !sessionId.isBlank()) {
+			headers.put("Mcp-Session-Id", sessionId);
+		}
+		oauth.getAuthorizationHeader(serverId).ifPresent(value -> headers.put("Authorization", value));
+		return headers.isEmpty() ? null : headers;
 	}
 
 	private static JsonRpcConnection.Framing toFraming(String framing) {

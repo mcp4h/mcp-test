@@ -21,6 +21,16 @@ public class ServerConfig {
 	public boolean supportsPrompts;
 	public boolean supportsDynamicConfig;
 	public boolean allowPolicy;
+	public boolean openidRequired;
+	public String openidResource;
+	public String openidIssuer;
+	public JsonNode openidMetadata;
+	public String oauthClientId;
+	public String oauthClientSecret;
+	public JsonNode oauthClientMetadata;
+	public String oauthAuthorizationUrl;
+	public String oauthTokenUrl;
+	public String oauthScopes;
 	public JsonNode configSchema;
 	public JsonNode configuration;
 	public Map<String, String> env = new HashMap<>();

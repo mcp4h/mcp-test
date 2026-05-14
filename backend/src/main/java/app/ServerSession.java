@@ -12,6 +12,7 @@ public class ServerSession {
 	public volatile JsonNode tools;
 	public volatile JsonNode resources;
 	public volatile JsonNode prompts;
+	public volatile String mcpSessionId;
 
 	public ServerSession(ServerConfig config, Process process, McpClient client, LogBroadcaster logStream) {
 		this.config = config;

@@ -1,4 +1,4 @@
-const API_BASE = "http://localhost:8080";
+export const API_BASE = "http://localhost:8080";
 async function request(path, options = {}) {
 	const response = await fetch(
 		`${API_BASE}${path}`,
@@ -65,4 +65,16 @@ export function openLogStream(serverName, onMessage) {
 	const source = new EventSource(`${API_BASE}/servers/${serverName}/events`);
 	source.onmessage = (event) => onMessage(event.data);
 	return source;
+}
+
+export function getAuthStatus(serverName) {
+	return request(`/servers/${serverName}/auth/status`);
+}
+
+export function startAuthLogin(serverName) {
+	return request(`/servers/${serverName}/auth/login`, { method: "POST" });
+}
+
+export function logoutAuth(serverName) {
+	return request(`/servers/${serverName}/auth/logout`, { method: "POST" });
 }

@@ -48,18 +48,33 @@
 							@click="openApplication(app)">{{ app.name || app.uri }}</button>
 					</div>
 					<div class="section-tabs-status">
-						<div class="server-label">
-							<span class="server-name">{{ currentServerName }}</span>
-							<span class="server-id">{{ currentServer }}</span>
-						</div>
-						<span class="status-pill" :class="statusClass">{{ statusLabel }}</span>
+					<div class="server-label">
+						<span class="server-name">{{ currentServerName }}</span>
+						<span class="server-id">{{ currentServer }}</span>
+					</div>
+					<span class="status-pill" :class="statusClass">{{ statusLabel }}</span>
+					<div v-if="authStatusForCurrent?.openidRequired" class="auth-controls">
+						<span class="status-pill" :class="authStatusClass">{{ authStatusLabel }}</span>
 						<button
-							v-if="selectedServer?.transport === 'stdio' && serverStatuses[currentServer]?.running"
+							v-if="!authStatusForCurrent?.hasToken"
 							class="ghost"
-							@click="restartServer(currentServer)"
-							:disabled="connectionState === 'connecting' && currentServer">
-							Restart
+							@click="beginAuthLogin(currentServer)">
+							Sign in
 						</button>
+						<button
+							v-else
+							class="ghost"
+							@click="logoutAuthForCurrent(currentServer)">
+							Log out
+						</button>
+					</div>
+					<button
+						v-if="selectedServer?.transport === 'stdio' && serverStatuses[currentServer]?.running"
+						class="ghost"
+						@click="restartServer(currentServer)"
+						:disabled="connectionState === 'connecting' && currentServer">
+						Restart
+					</button>
 						<button
 							v-else-if="selectedServer?.transport !== 'stdio' && serverStatuses[currentServer]?.running"
 							class="ghost"
@@ -68,6 +83,16 @@
 							Reconnect
 						</button>
 					</div>
+				</div>
+				<div v-if="authNotice" class="banner notice">{{ authNotice }}</div>
+				<div v-if="authHeadersDump" class="banner warning">
+					<div class="auth-headers-title">Auth headers</div>
+					<pre class="auth-headers">{{ authHeadersDump }}</pre>
+				</div>
+				<div
+					v-if="authStatusForCurrent?.openidRequired && authStatusForCurrent?.needsClientConfig"
+					class="banner warning">
+					This server requires a preconfigured OAuth client. Add a client ID/secret in Edit Server.
 				</div>
 				<section v-if="!currentServer || activeTab === 'Overview'" class="panel">
 					<div class="overview-grid">
@@ -350,6 +375,22 @@
 											class="meta-row">
 											<input v-model="allowedScopeEntries[index]" placeholder="execute:safe:ls"/>
 											<button class="ghost" @click="removeAllowedScope(index)">Remove</button>
+										</div>
+										<div v-if="toolDynamicScopes.length" class="meta-dynamic">
+											<div class="field-row">
+												<label>Dynamic scope hints</label>
+												<div class="field-row-actions">
+													<button class="ghost" @click="addDynamicScopes(toolDynamicScopes)">Add all</button>
+												</div>
+											</div>
+											<div class="meta-chip-list">
+												<span
+													v-for="scope in toolDynamicScopes"
+													:key="`dynamic-${scope}`"
+													class="meta-chip"
+													@click="addDynamicScopes([scope])">{{ scope }}</span>
+											</div>
+											<div class="muted">Click to add wildcard scopes for pre-approval.</div>
 										</div>
 										<div class="field-row">
 											<label>Denied scopes</label>
@@ -794,17 +835,57 @@
 							<option value="content-length">Content-Length</option>
 						</select>
 					</label>
+				<label>
+					Env (KEY=VALUE per line)
+					<textarea
+						v-model="newServer.env"
+						rows="4"
+						placeholder="FOO=bar"></textarea>
+				</label>
+				<label class="checkbox-field">
+					<div class="checkbox-row">
+						<input type="checkbox" v-model="newServer.openidRequired"/>
+						<span>OpenID required</span>
+					</div>
+					<div class="muted">Use OAuth 2.1 for this server.</div>
+				</label>
+				<div v-if="newServer.openidRequired" class="auth-grid">
 					<label>
-						Env (KEY=VALUE per line)
-						<textarea
-							v-model="newServer.env"
-							rows="4"
-							placeholder="FOO=bar"></textarea>
+						Resource URL
+						<input v-model="newServer.openidResource" placeholder="https://api.example.com"/>
+						<div class="muted">Leave blank to auto-detect from WWW-Authenticate.</div>
 					</label>
-					<label class="checkbox-field">
-						<div class="checkbox-row">
-							<input type="checkbox" v-model="newServer.supportsDynamicConfig"/>
-							<span>Supports dynamic configuration</span>
+					<label>
+						Authorization URL
+						<input v-model="newServer.oauthAuthorizationUrl" placeholder="https://auth.example.com/oauth2/authorize"/>
+					</label>
+					<label>
+						Token URL
+						<input v-model="newServer.oauthTokenUrl" placeholder="https://auth.example.com/oauth2/token"/>
+					</label>
+					<label>
+						Scopes
+						<input v-model="newServer.oauthScopes" placeholder="read write"/>
+						<div class="muted">Space-separated OAuth scopes.</div>
+					</label>
+					<label>
+						Client ID
+						<input v-model="newServer.oauthClientId" placeholder="Optional if dynamic registration is supported"/>
+					</label>
+					<label>
+						Client Secret
+						<input v-model="newServer.oauthClientSecret" type="password" placeholder="Optional"/>
+					</label>
+					<label>
+						Redirect URI
+						<input :value="oauthRedirectTemplate" readonly/>
+						<div class="muted">Use this redirect URI when registering the OAuth client.</div>
+					</label>
+				</div>
+				<label class="checkbox-field">
+					<div class="checkbox-row">
+						<input type="checkbox" v-model="newServer.supportsDynamicConfig"/>
+						<span>Supports dynamic configuration</span>
 						</div>
 						<div class="muted">Assumes SEP-1596 and accepts configuration via experimental capabilities.</div>
 					</label>
@@ -1052,14 +1133,54 @@
 							<option value="content-length">Content-Length</option>
 						</select>
 					</label>
+				<label>
+					Env (KEY=VALUE per line)
+					<textarea v-model="editServerForm.env" rows="4"></textarea>
+				</label>
+				<label class="checkbox-field">
+					<div class="checkbox-row">
+						<input type="checkbox" v-model="editServerForm.openidRequired"/>
+						<span>OpenID required</span>
+					</div>
+					<div class="muted">Use OAuth 2.1 for this server.</div>
+				</label>
+				<div v-if="editServerForm.openidRequired" class="auth-grid">
 					<label>
-						Env (KEY=VALUE per line)
-						<textarea v-model="editServerForm.env" rows="4"></textarea>
+						Resource URL
+						<input v-model="editServerForm.openidResource"/>
+						<div class="muted">Leave blank to auto-detect from WWW-Authenticate.</div>
 					</label>
-					<label class="checkbox-field">
-						<div class="checkbox-row">
-							<input type="checkbox" v-model="editServerForm.supportsDynamicConfig" :disabled="editServerForm.configInferred"/>
-							<span>Supports dynamic configuration</span>
+					<label>
+						Authorization URL
+						<input v-model="editServerForm.oauthAuthorizationUrl"/>
+					</label>
+					<label>
+						Token URL
+						<input v-model="editServerForm.oauthTokenUrl"/>
+					</label>
+					<label>
+						Scopes
+						<input v-model="editServerForm.oauthScopes" placeholder="read write"/>
+						<div class="muted">Space-separated OAuth scopes.</div>
+					</label>
+					<label>
+						Client ID
+						<input v-model="editServerForm.oauthClientId"/>
+					</label>
+					<label>
+						Client Secret
+						<input v-model="editServerForm.oauthClientSecret" type="password"/>
+					</label>
+					<label>
+						Redirect URI
+						<input :value="oauthRedirectForEdit" readonly/>
+						<div class="muted">Use this redirect URI when registering the OAuth client.</div>
+					</label>
+				</div>
+				<label class="checkbox-field">
+					<div class="checkbox-row">
+						<input type="checkbox" v-model="editServerForm.supportsDynamicConfig" :disabled="editServerForm.configInferred"/>
+						<span>Supports dynamic configuration</span>
 						</div>
 						<div class="muted">Assumes SEP-1596 and accepts configuration via experimental capabilities.</div>
 						<div v-if="editServerForm.configInferred" class="muted">Auto-detected from initialize.</div>
@@ -1110,20 +1231,24 @@
 	import {
 		createServer,
 		deleteSavedInput,
+		getAuthStatus,
 		getFacets,
 		getPrompt,
 		getStatus,
 		invokeTool,
 		listSavedInputs,
 		listServers,
+		logoutAuth,
 		openLogStream,
 		readResource,
 		saveInput,
+		startAuthLogin,
 		startServer,
 		stopServer,
 		updateSavedInput,
 		updateServer
 	} from "./api";
+	import { API_BASE } from "./api";
 	const tabs = ["Tools", "Resources", "Prompts", "Raw Log", "Definition"];
 	const activeTab = ref("Overview");
 	const servers = ref([]);
@@ -1132,6 +1257,8 @@
 	const connectionState = ref("idle");
 	const connectionError = ref("");
 	const serverStatuses = ref({});
+	const authStatuses = ref({});
+	const authNotice = ref("");
 	const facets = ref({
 		tools: null,
 		resources: null,
@@ -1177,6 +1304,13 @@
 			env: "",
 			supportsDynamicConfig: false,
 			allowPolicy: false,
+			openidRequired: false,
+			openidResource: "",
+			oauthClientId: "",
+			oauthClientSecret: "",
+			oauthAuthorizationUrl: "",
+			oauthTokenUrl: "",
+			oauthScopes: "",
 			configJson: "",
 			configSchema: null,
 			configInferred: false,
@@ -1223,6 +1357,13 @@
 			env: "",
 			supportsDynamicConfig: false,
 			allowPolicy: false,
+			openidRequired: false,
+			openidResource: "",
+			oauthClientId: "",
+			oauthClientSecret: "",
+			oauthAuthorizationUrl: "",
+			oauthTokenUrl: "",
+			oauthScopes: "",
 			configJson: ""
 		}
 	);
@@ -1233,6 +1374,15 @@
 			if (!selectedToolInfo.value) return "";
 			const annotations = selectedToolInfo.value.annotations || selectedToolInfo.value.annotation || null;
 			return annotations?.intentTemplate || selectedToolInfo.value.description || "";
+		}
+	);
+	const toolDynamicScopes = computed(
+		() => {
+			if (!selectedToolInfo.value) return [];
+			const annotations = selectedToolInfo.value.annotations || selectedToolInfo.value.annotation || null;
+			const list = annotations?.dynamic_scopes;
+			if (!Array.isArray(list)) return [];
+			return list.map((entry) => (entry == null ? "" : String(entry)).trim()).filter((entry) => entry);
 		}
 	);
 	const toolIntentDisplay = computed(
@@ -1266,6 +1416,43 @@
 			const schema = selectedServer.value?.configSchema || status.value.initialize?.configSchema || null;
 			if (!schema) return null;
 			return filterPolicySchema(schema);
+		}
+	);
+	const authStatusForCurrent = computed(
+		() => (currentServer.value ? authStatuses.value[currentServer.value] : null)
+	);
+	const oauthRedirectTemplate = computed(
+		() => `${API_BASE}/servers/{serverId}/auth/callback`
+	);
+	const oauthRedirectForEdit = computed(() => {
+		if (!editServerId.value) {
+			return oauthRedirectTemplate.value;
+		}
+		return `${API_BASE}/servers/${editServerId.value}/auth/callback`;
+	});
+	const authStatusLabel = computed(
+		() => {
+			const authStatus = authStatusForCurrent.value;
+			if (!authStatus || !authStatus.openidRequired) return "Auth: n/a";
+			if (authStatus.hasToken) return "Auth: connected";
+			if (authStatus.needsClientConfig) return "Auth: client needed";
+			return "Auth: sign in";
+		}
+	);
+	const authStatusClass = computed(
+		() => {
+			const authStatus = authStatusForCurrent.value;
+			if (!authStatus || !authStatus.openidRequired) return "idle";
+			if (authStatus.hasToken) return "connected";
+			if (authStatus.needsClientConfig) return "warning";
+			return "idle";
+		}
+	);
+	const authHeadersDump = computed(
+		() => {
+			const authStatus = authStatusForCurrent.value;
+			if (!authStatus || !authStatus.lastAuthHeaders) return "";
+			return authStatus.lastAuthHeaders;
 		}
 	);
 	const responseResult = computed(
@@ -1740,6 +1927,22 @@
 	async function loadFacets() {
 		if (!currentServer.value) return;
 		facets.value = await getFacets(currentServer.value);
+		updateServerSupportsFromFacets(currentServer.value, facets.value);
+	}
+	function updateServerSupportsFromFacets(serverId, facetsValue) {
+		if (!serverId || !facetsValue) return;
+		const index = servers.value.findIndex((server) => server.id === serverId);
+		if (index < 0) return;
+		const current = servers.value[index];
+		const supportsTools = facetsValue.tools != null;
+		const supportsResources = facetsValue.resources != null;
+		const supportsPrompts = facetsValue.prompts != null;
+		servers.value[index] = {
+			...current,
+			supportsTools,
+			supportsResources,
+			supportsPrompts
+		};
 	}
 	async function refreshDefinition() {
 		if (!currentServer.value) return;
@@ -1755,6 +1958,73 @@
 			status.value = { running: false, capabilities: null, initialize: null };
 			serverStatuses.value[currentServer.value] = status.value;
 		}
+	}
+	async function refreshAuthStatus(id = currentServer.value) {
+		if (!id) return;
+		try {
+			authStatuses.value[id] = await getAuthStatus(id);
+		}
+		catch {
+			// ignore auth status errors
+		}
+	}
+	async function beginAuthLogin(id) {
+		if (!id) return;
+		authNotice.value = "";
+		try {
+			const response = await startAuthLogin(id);
+			if (response?.needsClientConfig) {
+				authNotice.value = response.error || "Client registration required.";
+				await refreshAuthStatus(id);
+				return;
+			}
+			if (!response?.url) {
+				authNotice.value = response?.error || "Failed to start OAuth flow.";
+				return;
+			}
+			const popup = window.open(response.url, "oauth", "width=520,height=700");
+			const start = Date.now();
+			const timer = setInterval(async () => {
+				const elapsed = Date.now() - start;
+				if (elapsed > 60000) {
+					clearInterval(timer);
+					return;
+				}
+				await refreshAuthStatus(id);
+				if (authStatuses.value[id]?.hasToken) {
+					clearInterval(timer);
+					if (popup && !popup.closed) {
+						popup.close();
+					}
+				}
+				if (popup && popup.closed) {
+					clearInterval(timer);
+				}
+			}, 1000);
+		}
+		catch (error) {
+			authNotice.value = error?.message || "Failed to start OAuth flow.";
+		}
+	}
+	async function logoutAuthForCurrent(id) {
+		if (!id) return;
+		authNotice.value = "";
+		try {
+			await logoutAuth(id);
+			await refreshAuthStatus(id);
+		}
+		catch (error) {
+			authNotice.value = error?.message || "Failed to log out.";
+		}
+	}
+	async function handleAuthFailure(id, error) {
+		const message = error?.message || "";
+		if (!id) return;
+		if (!message.includes("401") && !message.toLowerCase().includes("unauthorized")) {
+			return;
+		}
+		await refreshAuthStatus(id);
+		await loadServers();
 	}
 	async function createNewServer() {
 		newServerError.value = "";
@@ -1779,6 +2049,13 @@
 			env: envMap,
 			supportsDynamicConfig,
 			allowPolicy: supportsDynamicConfig ? !!newServer.value.allowPolicy : false,
+			openidRequired: !!newServer.value.openidRequired,
+			openidResource: newServer.value.openidResource,
+			oauthClientId: newServer.value.oauthClientId,
+			oauthClientSecret: newServer.value.oauthClientSecret,
+			oauthAuthorizationUrl: newServer.value.oauthAuthorizationUrl,
+			oauthTokenUrl: newServer.value.oauthTokenUrl,
+			oauthScopes: newServer.value.oauthScopes,
 			configuration: configParse.value
 		};
 		try {
@@ -1798,6 +2075,13 @@
 				env: "",
 				supportsDynamicConfig: false,
 				allowPolicy: false,
+				openidRequired: false,
+				openidResource: "",
+				oauthClientId: "",
+				oauthClientSecret: "",
+				oauthAuthorizationUrl: "",
+				oauthTokenUrl: "",
+				oauthScopes: "",
 				configJson: ""
 			};
 			newServerTab.value = "connection";
@@ -1824,6 +2108,13 @@
 			env: envToText(server.env),
 			supportsDynamicConfig: !!server.supportsDynamicConfig || inferredConfig,
 			allowPolicy: !!server.allowPolicy || inferredPolicy,
+			openidRequired: !!server.openidRequired,
+			openidResource: server.openidResource || "",
+			oauthClientId: server.oauthClientId || "",
+			oauthClientSecret: server.oauthClientSecret || "",
+			oauthAuthorizationUrl: server.oauthAuthorizationUrl || "",
+			oauthTokenUrl: server.oauthTokenUrl || "",
+			oauthScopes: server.oauthScopes || "",
 			configJson: server.configuration ? formatJsonValue(server.configuration) : "",
 			configSchema: server.configSchema || null,
 			configInferred: inferredConfig,
@@ -1864,6 +2155,13 @@
 			env: parseEnv(editServerForm.value.env),
 			supportsDynamicConfig,
 			allowPolicy: supportsDynamicConfig ? !!editServerForm.value.allowPolicy : false,
+			openidRequired: !!editServerForm.value.openidRequired,
+			openidResource: editServerForm.value.openidResource,
+			oauthClientId: editServerForm.value.oauthClientId,
+			oauthClientSecret: editServerForm.value.oauthClientSecret,
+			oauthAuthorizationUrl: editServerForm.value.oauthAuthorizationUrl,
+			oauthTokenUrl: editServerForm.value.oauthTokenUrl,
+			oauthScopes: editServerForm.value.oauthScopes,
 			configuration: configParse.value
 		};
 		try {
@@ -1893,6 +2191,7 @@
 		connectionState.value = "connecting";
 		currentServer.value = id;
 		activeTab.value = "Tools";
+		await refreshAuthStatus(id);
 		try {
 			const latestStatus = await getStatus(id);
 			serverStatuses.value[id] = latestStatus;
@@ -1925,6 +2224,7 @@
 			serverStatuses.value[id] = { running: false };
 			status.value = { running: false, capabilities: null, initialize: null };
 			activeTab.value = "Raw Log";
+			await handleAuthFailure(id, error);
 		}
 	}
 	async function restartServer(id) {
@@ -1990,6 +2290,7 @@
 				connectionError.value = error?.message || "Failed to restart.";
 				activeTab.value = "Raw Log";
 			}
+			await handleAuthFailure(id, error);
 		}
 	}
 	async function startServerBackground(id) {
@@ -2017,6 +2318,7 @@
 				status.value = { running: false, capabilities: null, initialize: null };
 				activeTab.value = "Raw Log";
 			}
+			await handleAuthFailure(id, error);
 		}
 	}
 	function applyInitializeToServer(serverId, initialize) {
@@ -2102,6 +2404,7 @@
 				connectionError.value = error?.message || "Failed to reconnect.";
 				activeTab.value = "Raw Log";
 			}
+			await handleAuthFailure(id, error);
 		}
 	}
 	function selectTool(tool) {
@@ -2152,6 +2455,16 @@
 	}
 	function addAllowedScope() {
 		allowedScopeEntries.value.push("");
+	}
+	function addDynamicScopes(scopes) {
+		const next = normalizeScopeEntries(scopes).map((scope) => scope.endsWith(":*")
+			? scope.slice(0, -2)
+			: scope);
+		for (const scope of next) {
+			if (!allowedScopeEntries.value.includes(scope)) {
+				allowedScopeEntries.value.push(scope);
+			}
+		}
 	}
 	function removeAllowedScope(index) {
 		allowedScopeEntries.value.splice(index, 1);
@@ -3627,8 +3940,20 @@
 		background: rgba(248, 113, 113, 0.12);
 	}
 
+	.status-pill.warning {
+		color: #fde68a;
+		border-color: rgba(251, 191, 36, 0.8);
+		background: rgba(251, 191, 36, 0.12);
+	}
+
 	.status-pill.idle {
 		color: var(--color-muted);
+	}
+
+	.auth-controls {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
 	}
 
 	.list li.selected {
@@ -4172,6 +4497,35 @@
 		background: rgba(248, 113, 113, 0.12);
 	}
 
+	.banner.warning {
+		border-color: rgba(251, 191, 36, 0.6);
+		color: #fde68a;
+		background: rgba(251, 191, 36, 0.12);
+	}
+
+	.auth-headers-title {
+		font-size: 12px;
+		text-transform: uppercase;
+		letter-spacing: 0.6px;
+		margin-bottom: 6px;
+		color: #fcd34d;
+	}
+
+	.auth-headers {
+		margin: 0;
+		white-space: pre-wrap;
+		font-family: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+		font-size: 12px;
+		color: #fff7d6;
+	}
+
+	.auth-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+		gap: 12px;
+		width: 100%;
+	}
+
 	.meta-chip {
 		font-size: 11px;
 		padding: 2px 8px;
@@ -4185,6 +4539,12 @@
 		background: rgba(251, 191, 36, 0.18);
 		border-color: rgba(251, 191, 36, 0.55);
 		color: #fde68a;
+	}
+
+	.meta-chip-list {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
 	}
 
 	.requested-scopes {

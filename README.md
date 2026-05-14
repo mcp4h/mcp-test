@@ -23,6 +23,16 @@ npm install
 npm run dev
 ```
 
+## OAuth2 redirect URI
+
+Configure your OAuth2 client redirect URI as:
+
+```
+http://localhost:8080/servers/{serverId}/auth/callback
+```
+
+Replace `{serverId}` with the server id you configured.
+
 ## Debug MCP bridge messages
 
 Run this in the browser console to log MCP postMessage traffic from the host page:

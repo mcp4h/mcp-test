@@ -12,6 +12,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
+import java.util.function.Supplier;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -22,16 +23,29 @@ public class StreamableHttpMcpClient implements McpClient {
 	private final ObjectMapper mapper;
 	private final HttpClient client;
 	private final URI endpoint;
-	private final Map<String, String> headers;
+	private final Supplier<Map<String, String>> headers;
 	private final Consumer<String> logSink;
+	private final Consumer<String> unauthorizedHandler;
+	private final Consumer<String> authHeadersSink;
+	private final Consumer<String> sessionIdSink;
 	private final AtomicInteger nextId = new AtomicInteger(1);
 
-	public StreamableHttpMcpClient(ObjectMapper mapper, String url, Map<String, String> headers, Consumer<String> logSink) {
+	public StreamableHttpMcpClient(
+		ObjectMapper mapper,
+		String url,
+		Supplier<Map<String, String>> headers,
+		Consumer<String> logSink,
+		Consumer<String> unauthorizedHandler,
+		Consumer<String> authHeadersSink,
+		Consumer<String> sessionIdSink) {
 		this.mapper = mapper;
 		this.client = HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build();
 		this.endpoint = URI.create(url);
 		this.headers = headers;
 		this.logSink = logSink;
+		this.unauthorizedHandler = unauthorizedHandler;
+		this.authHeadersSink = authHeadersSink;
+		this.sessionIdSink = sessionIdSink;
 	}
 
 	@Override
@@ -107,7 +121,7 @@ public class StreamableHttpMcpClient implements McpClient {
 		if (params != null) {
 			payload.set("params", params);
 		}
-		return send(payload, id)
+		return send(payload, id, method)
 			.thenApply(
 				message -> {
 					if (message.has("result")) {
@@ -130,7 +144,7 @@ public class StreamableHttpMcpClient implements McpClient {
 		if (params != null) {
 			payload.set("params", params);
 		}
-		return send(payload, id);
+		return send(payload, id, method);
 	}
 
 	private void notify(String method, JsonNode params) {
@@ -140,10 +154,10 @@ public class StreamableHttpMcpClient implements McpClient {
 		if (params != null) {
 			payload.set("params", params);
 		}
-		send(payload, null);
+		send(payload, null, method);
 	}
 
-	private CompletableFuture<JsonNode> send(ObjectNode payload, Integer id) {
+	private CompletableFuture<JsonNode> send(ObjectNode payload, Integer id, String method) {
 		try {
 			String json = mapper.writeValueAsString(payload);
 			logSink.accept(">> " + json);
@@ -152,14 +166,20 @@ public class StreamableHttpMcpClient implements McpClient {
 				.timeout(REQUEST_TIMEOUT)
 				.POST(HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8))
 				.header("Content-Type", "application/json")
-				.header("Accept", "application/x-ndjson, application/json");
-			if (headers != null) {
-				for (Map.Entry<String, String> entry : headers.entrySet()) {
+				.header("Accept", "application/x-ndjson, application/json, text/event-stream");
+			logRequestLine(method, endpoint);
+			Map<String, String> activeHeaders = headers == null ? null : headers.get();
+			if (activeHeaders != null && !activeHeaders.isEmpty()) {
+				logRequestHeaders(method, endpoint, activeHeaders);
+				for (Map.Entry<String, String> entry : activeHeaders.entrySet()) {
 					builder.header(entry.getKey(), entry.getValue());
 				}
 			}
-			return client.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofInputStream())
-				.thenCompose(response -> parseResponse(response, id));
+			else {
+				logSink.accept(">> HTTP headers" + formatMethodSuffix(method) + ": (none)");
+			}
+		return client.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofInputStream())
+			.thenCompose(response -> parseResponse(response, id, method));
 		}
 		catch (Exception e) {
 			CompletableFuture<JsonNode> failed = new CompletableFuture<>();
@@ -168,27 +188,43 @@ public class StreamableHttpMcpClient implements McpClient {
 		}
 	}
 
-	private CompletableFuture<JsonNode> parseResponse(HttpResponse<InputStream> response, Integer id) {
+	private CompletableFuture<JsonNode> parseResponse(HttpResponse<InputStream> response, Integer id, String method) {
 		return CompletableFuture.supplyAsync(
 			() -> {
 				String contentType = response.headers().firstValue("Content-Type").orElse("");
+				logResponseHeaders(method, response);
+				captureSessionId(response);
 				try {
 					if (response.statusCode() >= 400) {
+						if (response.statusCode() == 401) {
+							logUnauthorized(response);
+							handleUnauthorized(response);
+						}
 						String body = new String(response.body().readAllBytes(), StandardCharsets.UTF_8);
-						logSink.accept("<< HTTP " + response.statusCode() + " " + body);
-						throw new IllegalStateException("HTTP " + response.statusCode() + " from server");
+						logSink.accept("<< HTTP body" + formatMethodSuffix(method) + " " + body);
+						String message = body == null || body.isBlank()
+							? "HTTP " + response.statusCode() + " from server"
+							: "HTTP " + response.statusCode() + " from server: " + body;
+						throw new IllegalStateException(message);
 					}
 					if (contentType.contains("ndjson") || contentType.contains("jsonlines")) {
 						return parseNdjson(response.body(), id);
 					}
+					if (contentType.contains("text/event-stream")) {
+						return parseSse(response.body(), id);
+					}
 					String body = new String(response.body().readAllBytes(), StandardCharsets.UTF_8).trim();
 					if (body.isEmpty()) {
+						logSink.accept("<< HTTP body" + formatMethodSuffix(method) + ": (empty)");
 						return mapper.createObjectNode();
 					}
-					logSink.accept("<< " + body);
+					logSink.accept("<< HTTP body" + formatMethodSuffix(method) + " " + body);
 					return mapper.readTree(body);
 				}
 				catch (Exception e) {
+					if (e instanceof IllegalStateException && e.getMessage() != null && e.getMessage().startsWith("HTTP ")) {
+						throw (IllegalStateException) e;
+					}
 					throw new IllegalStateException("Failed to parse response", e);
 				}
 			}
@@ -214,5 +250,157 @@ public class StreamableHttpMcpClient implements McpClient {
 			}
 		}
 		throw new IllegalStateException("Stream ended without response");
+	}
+
+	private JsonNode parseSse(InputStream input, Integer id) throws Exception {
+		try (BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
+			String line;
+			StringBuilder dataBuffer = new StringBuilder();
+			while ((line = reader.readLine()) != null) {
+				String trimmed = line.trim();
+				if (trimmed.isEmpty()) {
+					if (dataBuffer.length() == 0) {
+						continue;
+					}
+					String payload = dataBuffer.toString().trim();
+					dataBuffer.setLength(0);
+					if (payload.isEmpty()) {
+						continue;
+					}
+					logSink.accept("<< " + payload);
+					JsonNode node = mapper.readTree(payload);
+					if (id == null) {
+						return node;
+					}
+					if (node.has("id") && node.get("id").asInt() == id) {
+						return node;
+					}
+					continue;
+				}
+				if (trimmed.startsWith("data:")) {
+					String data = trimmed.substring(5).trim();
+					if (!data.isEmpty()) {
+						dataBuffer.append(data).append("\n");
+					}
+				}
+			}
+		}
+		throw new IllegalStateException("Stream ended without response");
+	}
+
+	private void handleUnauthorized(HttpResponse<?> response) {
+		if (unauthorizedHandler == null) {
+			return;
+		}
+		String header = response.headers().firstValue("WWW-Authenticate").orElse(null);
+		unauthorizedHandler.accept(header);
+	}
+
+	private void logUnauthorized(HttpResponse<?> response) {
+		StringBuilder builder = new StringBuilder();
+		builder.append("<< HTTP 401 headers:\n");
+		response.headers().map().forEach(
+			(key, values) -> {
+				builder.append(key).append("=");
+				if (values != null && !values.isEmpty()) {
+					builder.append(String.join(";", values));
+				}
+				builder.append("\n");
+			}
+		);
+		String dump = builder.toString().trim();
+		logSink.accept(dump);
+		if (authHeadersSink != null) {
+			authHeadersSink.accept(dump.replaceFirst("^<< HTTP 401 headers:\\n", ""));
+		}
+	}
+
+	private void logRequestHeaders(String method, URI url, Map<String, String> activeHeaders) {
+		if (activeHeaders == null || activeHeaders.isEmpty()) {
+			return;
+		}
+		StringBuilder builder = new StringBuilder();
+		builder.append(">> HTTP headers");
+		if (method != null && !method.isBlank()) {
+			builder.append(" (").append(method).append(")");
+		}
+		if (url != null) {
+			builder.append(" ").append(url);
+		}
+		builder.append("\n");
+		activeHeaders.forEach(
+			(key, value) -> {
+				String output = value;
+				if ("authorization".equalsIgnoreCase(key) && value != null && !value.isBlank()) {
+					int space = value.indexOf(' ');
+					if (space > 0) {
+						String scheme = value.substring(0, space).trim();
+						output = scheme.isBlank() ? "****" : scheme + " ****";
+					}
+					else {
+						output = "****";
+					}
+				}
+				builder.append(key).append("=").append(output == null ? "" : output).append("\n");
+			}
+		);
+		logSink.accept(builder.toString().trim());
+	}
+
+	private void logRequestLine(String method, URI url) {
+		StringBuilder builder = new StringBuilder();
+		builder.append(">> HTTP request");
+		if (method != null && !method.isBlank()) {
+			builder.append(" (").append(method).append(")");
+		}
+		if (url != null) {
+			builder.append(" ").append(url);
+		}
+		logSink.accept(builder.toString());
+	}
+
+	private void captureSessionId(HttpResponse<?> response) {
+		if (sessionIdSink == null || response == null) {
+			return;
+		}
+		response.headers().firstValue("mcp-session-id").ifPresent(sessionIdSink);
+	}
+
+	private void logResponseHeaders(String method, HttpResponse<?> response) {
+		if (response == null) {
+			return;
+		}
+		StringBuilder builder = new StringBuilder();
+		builder.append("<< HTTP response");
+		if (method != null && !method.isBlank()) {
+			builder.append(" (").append(method).append(")");
+		}
+		builder.append(" ").append(response.statusCode());
+		try {
+			URI uri = response.request() != null ? response.request().uri() : null;
+			if (uri != null) {
+				builder.append(" ").append(uri);
+			}
+		}
+		catch (Exception ignored) {
+		}
+		builder.append("\n");
+		response.headers().map().forEach(
+			(key, values) -> {
+				builder.append(key).append("=");
+				if (values != null && !values.isEmpty()) {
+					builder.append(String.join(";", values));
+				}
+				builder.append("\n");
+			}
+		);
+		logSink.accept(builder.toString().trim());
+	}
+
+	private static String formatMethodSuffix(String method) {
+		if (method == null || method.isBlank()) {
+			return "";
+		}
+		return " (" + method + ")";
 	}
 }
